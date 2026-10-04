@@ -1,8 +1,9 @@
-import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
-import DeckGL from '@deck.gl/react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
+import * as maplibregl from 'maplibre-gl';
+import 'maplibre-gl/dist/maplibre-gl.css';
+import { MapboxOverlay } from '@deck.gl/mapbox';
 import { GoogleMapsOverlay } from '@deck.gl/google-maps';
-import { PathLayer, ScatterplotLayer, PolygonLayer, BitmapLayer } from '@deck.gl/layers';
-import { TileLayer } from '@deck.gl/geo-layers';
+import { PathLayer, ScatterplotLayer, PolygonLayer } from '@deck.gl/layers';
 import { HeatmapLayer } from '@deck.gl/aggregation-layers';
 import {
   GOOGLE_MAPS_API_KEY,
@@ -11,7 +12,8 @@ import {
   INITIAL_MAP_OPTIONS,
 } from '../config/mapConfig';
 import { RISK_COLORS_RGB, STATUS_COLORS_RGB, TIER_LABELS } from '../config/riskColors';
-import { MapPin, Info, RefreshCw } from 'lucide-react';
+import { CHENNAI_TNAGAR_BUILDINGS_GEOJSON } from '../config/chennaiBuildings';
+import { MapPin, RefreshCw, Compass } from 'lucide-react';
 
 function buildFloodPolygons(roads) {
   const ROAD_BUFFER_DEG = 0.0003;
@@ -90,6 +92,17 @@ function buildTooltipHtml(object) {
   return null;
 }
 
+const TOOLTIP_STYLE = {
+  backgroundColor: 'rgba(10,14,26,0.94)',
+  color: '#f1f5f9',
+  padding: '10px 12px',
+  borderRadius: '6px',
+  fontSize: '0.82rem',
+  border: '1px solid rgba(255,255,255,0.12)',
+  maxWidth: '240px',
+  boxShadow: '0 4px 16px rgba(0,0,0,0.6)',
+};
+
 const GOOGLE_MAPS_SCRIPT_ID = 'google-maps-api-script';
 
 function loadGoogleMapsApi(apiKey) {
@@ -109,33 +122,10 @@ function loadGoogleMapsApi(apiKey) {
     script.async = true;
     script.defer = true;
     script.onload = () => resolve(window.google.maps);
-    script.onerror = () => reject(new Error('Google Maps API network error. Check connection or key restriction.'));
+    script.onerror = () => reject(new Error('Google Maps script load network error'));
     document.head.appendChild(script);
   });
 }
-
-// ── Tooltip style shared by both modes ──
-const TOOLTIP_STYLE = {
-  backgroundColor: 'rgba(10,14,26,0.94)',
-  color: '#f1f5f9',
-  padding: '10px 12px',
-  borderRadius: '6px',
-  fontSize: '0.82rem',
-  border: '1px solid rgba(255,255,255,0.12)',
-  maxWidth: '240px',
-  boxShadow: '0 4px 16px rgba(0,0,0,0.6)',
-};
-
-// ── Standalone initial viewState matching Chennai T. Nagar ──
-const STANDALONE_VIEW_STATE = {
-  longitude: CHENNAI_TNAGAR_CENTER.lng,
-  latitude: CHENNAI_TNAGAR_CENTER.lat,
-  zoom: 15.5,
-  pitch: 55,
-  bearing: -15,
-  minZoom: 10,
-  maxZoom: 20,
-};
 
 export default function MapComponent({
   simState,
@@ -148,100 +138,27 @@ export default function MapComponent({
   routingDestination,
 }) {
   const mapContainerRef = useRef(null);
-  const googleMapRef = useRef(null);
-  const overlayRef = useRef(null);
-  const clickListenerRef = useRef(null);
+  const maplibreInstanceRef = useRef(null);
+  const googleMapInstanceRef = useRef(null);
+  const deckOverlayRef = useRef(null);
 
-  // Determine initial mode: use Google Maps if key present, else standalone
-  const useGoogleMaps = Boolean(GOOGLE_MAPS_API_KEY);
-  const [loadState, setLoadState] = useState(useGoogleMaps ? 'loading' : 'standalone');
+  const [activeProvider, setActiveProvider] = useState(
+    GOOGLE_MAPS_API_KEY ? 'google-loading' : 'maplibre'
+  );
 
-  // Handle Google Maps authentication failures
+  // Catch Google Maps auth failures and automatically switch to MapLibre
   useEffect(() => {
-    if (!useGoogleMaps) return;
     window.gm_authFailure = () => {
-      console.error('[Google Maps Auth] Invalid or unauthorized VITE_GOOGLE_MAPS_API_KEY');
-      setLoadState('standalone'); // fallback to standalone on auth failure
+      console.warn('[FloodTwin Map] Google Maps API key unauthorized. Switching to MapLibre GL JS 3D Satellite Map.');
+      setActiveProvider('maplibre');
     };
     return () => {
       window.gm_authFailure = null;
     };
-  }, [useGoogleMaps]);
+  }, []);
 
-  // Initialise Google Maps 3D Satellite API automatically from environment variable
-  useEffect(() => {
-    if (!useGoogleMaps) return;
-
-    let isSubscribed = true;
-    setLoadState('loading');
-
-    loadGoogleMapsApi(GOOGLE_MAPS_API_KEY)
-      .then((mapsApi) => {
-        if (!isSubscribed || !mapContainerRef.current) return;
-
-        const mapOptions = {
-          ...INITIAL_MAP_OPTIONS,
-          ...(GOOGLE_MAPS_MAP_ID ? { mapId: GOOGLE_MAPS_MAP_ID } : {}),
-        };
-
-        // Create official Google Maps 3D Satellite / Hybrid instance for Chennai
-        const map = new mapsApi.Map(mapContainerRef.current, mapOptions);
-        googleMapRef.current = map;
-
-        // Create deck.gl Google Maps overlay for analytical layers
-        const overlay = new GoogleMapsOverlay({
-          getTooltip: ({ object }) => {
-            const html = buildTooltipHtml(object);
-            return html ? { html, style: TOOLTIP_STYLE } : null;
-          },
-        });
-        overlay.setMap(map);
-        overlayRef.current = overlay;
-
-        setLoadState('ready');
-      })
-      .catch((err) => {
-        if (!isSubscribed) return;
-        console.error('[FloodTwin Map Load Error]', err);
-        setLoadState('standalone'); // fallback to standalone on error
-      });
-
-    return () => {
-      isSubscribed = false;
-      if (overlayRef.current) {
-        overlayRef.current.setMap(null);
-        overlayRef.current = null;
-      }
-      googleMapRef.current = null;
-    };
-  }, [useGoogleMaps]);
-
-  // Handle map click events for routing origin/destination selection (Google Maps mode)
-  useEffect(() => {
-    const map = googleMapRef.current;
-    if (!map || loadState !== 'ready') return;
-
-    if (clickListenerRef.current) {
-      window.google.maps.event.removeListener(clickListenerRef.current);
-      clickListenerRef.current = null;
-    }
-
-    if (onMapClick) {
-      clickListenerRef.current = map.addListener('click', (e) => {
-        onMapClick([e.latLng.lng(), e.latLng.lat()]);
-      });
-    }
-
-    return () => {
-      if (clickListenerRef.current && window.google?.maps?.event) {
-        window.google.maps.event.removeListener(clickListenerRef.current);
-        clickListenerRef.current = null;
-      }
-    };
-  }, [onMapClick, loadState]);
-
-  // ── Build deck.gl simulation layers (shared by both modes) ──
-  const buildLayers = useCallback(() => {
+  // ── Build simulation Deck.gl layers ──
+  const buildSimulationLayers = useCallback(() => {
     const result = [];
 
     if (enabledLayers.rainfall && simState.nowcast?.cells?.length) {
@@ -414,114 +331,174 @@ export default function MapComponent({
     return result;
   }, [simState, enabledLayers, routePath, routingOrigin, routingDestination, onNodeClick, onRoadClick]);
 
-  // Update deck.gl overlay layers when simulation state changes (Google Maps mode)
+  // ── Initialize Priority 1: Google Maps 3D ──
   useEffect(() => {
-    if (overlayRef.current && loadState === 'ready') {
-      overlayRef.current.setProps({ layers: buildLayers() });
-    }
-  }, [buildLayers, loadState]);
+    if (activeProvider !== 'google-loading') return;
 
-  // ── Build standalone layers (Carto Dark Matter basemap + simulation layers) ──
-  const standaloneLayers = useMemo(() => {
-    if (loadState !== 'standalone') return [];
+    let isSubscribed = true;
+    loadGoogleMapsApi(GOOGLE_MAPS_API_KEY)
+      .then((mapsApi) => {
+        if (!isSubscribed || !mapContainerRef.current) return;
 
-    const basemap = new TileLayer({
-      id: 'carto-dark-basemap',
-      data: 'https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png',
-      minZoom: 0,
-      maxZoom: 19,
-      tileSize: 256,
-      renderSubLayers: (props) => {
-        const {
-          boundingBox: [
-            [west, south],
-            [east, north],
-          ],
-        } = props.tile;
-        return new BitmapLayer(props, {
-          data: null,
-          image: props.data,
-          bounds: [west, south, east, north],
+        const mapOptions = {
+          ...INITIAL_MAP_OPTIONS,
+          ...(GOOGLE_MAPS_MAP_ID ? { mapId: GOOGLE_MAPS_MAP_ID } : {}),
+        };
+
+        const map = new mapsApi.Map(mapContainerRef.current, mapOptions);
+        googleMapInstanceRef.current = map;
+
+        const overlay = new GoogleMapsOverlay({
+          getTooltip: ({ object }) => {
+            const html = buildTooltipHtml(object);
+            return html ? { html, style: TOOLTIP_STYLE } : null;
+          },
         });
+        overlay.setMap(map);
+        deckOverlayRef.current = overlay;
+
+        if (onMapClick) {
+          map.addListener('click', (e) => {
+            onMapClick([e.latLng.lng(), e.latLng.lat()]);
+          });
+        }
+
+        setActiveProvider('google');
+      })
+      .catch((err) => {
+        if (!isSubscribed) return;
+        console.warn('[FloodTwin Map] Google Maps API failed to load. Falling back to MapLibre 3D Satellite Map:', err);
+        setActiveProvider('maplibre');
+      });
+
+    return () => {
+      isSubscribed = false;
+      if (deckOverlayRef.current && activeProvider === 'google') {
+        deckOverlayRef.current.setMap(null);
+        deckOverlayRef.current = null;
+      }
+      googleMapInstanceRef.current = null;
+    };
+  }, [activeProvider, onMapClick]);
+
+  // ── Initialize Mandatory Fallback: MapLibre GL JS 3D Satellite Map ──
+  useEffect(() => {
+    if (activeProvider !== 'maplibre' || !mapContainerRef.current) return;
+
+    // Clean up previous instance
+    if (maplibreInstanceRef.current) {
+      maplibreInstanceRef.current.remove();
+      maplibreInstanceRef.current = null;
+    }
+
+    const mapStyle = {
+      version: 8,
+      sources: {
+        'esri-satellite': {
+          type: 'raster',
+          tiles: [
+            'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+          ],
+          tileSize: 256,
+          attribution: '© Esri, Maxar, Earthstar Geographics, and GIS User Community',
+          maxzoom: 19,
+        },
+        'chennai-3d-buildings': {
+          type: 'geojson',
+          data: CHENNAI_TNAGAR_BUILDINGS_GEOJSON,
+        },
+      },
+      layers: [
+        {
+          id: 'satellite-tiles',
+          type: 'raster',
+          source: 'esri-satellite',
+          minzoom: 0,
+          maxzoom: 19,
+        },
+        {
+          id: '3d-buildings-extrusion',
+          type: 'fill-extrusion',
+          source: 'chennai-3d-buildings',
+          paint: {
+            'fill-extrusion-color': [
+              'interpolate',
+              ['linear'],
+              ['get', 'height'],
+              15, '#1e293b',
+              30, '#334155',
+              45, '#475569',
+              60, '#64748b',
+            ],
+            'fill-extrusion-height': ['get', 'height'],
+            'fill-extrusion-base': 0,
+            'fill-extrusion-opacity': 0.82,
+          },
+        },
+      ],
+    };
+
+    const map = new maplibregl.Map({
+      container: mapContainerRef.current,
+      style: mapStyle,
+      center: [CHENNAI_TNAGAR_CENTER.lng, CHENNAI_TNAGAR_CENTER.lat],
+      zoom: 15.6,
+      pitch: 58,
+      bearing: -15,
+      maxPitch: 85,
+      attributionControl: false,
+    });
+    maplibreInstanceRef.current = map;
+
+    const deckOverlay = new MapboxOverlay({
+      interleaved: true,
+      layers: buildSimulationLayers(),
+      getTooltip: ({ object }) => {
+        const html = buildTooltipHtml(object);
+        return html ? { html, style: TOOLTIP_STYLE } : null;
       },
     });
 
-    return [basemap, ...buildLayers()];
-  }, [loadState, buildLayers]);
+    map.addControl(deckOverlay);
+    deckOverlayRef.current = deckOverlay;
 
-  // ── Handle standalone map click for routing ──
-  const handleStandaloneClick = useCallback(
-    (info) => {
-      if (onMapClick && info.coordinate) {
-        onMapClick(info.coordinate);
+    map.on('click', (e) => {
+      if (onMapClick) {
+        onMapClick([e.lngLat.lng, e.lngLat.lat]);
       }
-    },
-    [onMapClick],
-  );
+    });
 
-  // ── Standalone tooltip handler ──
-  const standaloneTooltip = useCallback(({ object }) => {
-    const html = buildTooltipHtml(object);
-    return html ? { html, style: TOOLTIP_STYLE } : null;
-  }, []);
+    return () => {
+      if (maplibreInstanceRef.current) {
+        maplibreInstanceRef.current.remove();
+        maplibreInstanceRef.current = null;
+      }
+      deckOverlayRef.current = null;
+    };
+  }, [activeProvider, onMapClick]);
 
-  // ══════════════════════════════════════════════════════════
-  // RENDER
-  // ══════════════════════════════════════════════════════════
+  // ── Sync Deck.gl simulation layers on state updates ──
+  useEffect(() => {
+    if (deckOverlayRef.current) {
+      deckOverlayRef.current.setProps({ layers: buildSimulationLayers() });
+    }
+  }, [buildSimulationLayers]);
+
   return (
-    <div style={{ position: 'relative', width: '100%', height: '100%', minHeight: '100%', backgroundColor: '#0a0e1a' }}>
+    <div style={{ position: 'relative', width: '100%', height: '100%', minHeight: '100%', backgroundColor: '#0a0e1a', overflow: 'hidden' }}>
 
-      {/* ── MODE A: Standalone Deck.GL + Carto Dark basemap (no API key needed) ── */}
-      {loadState === 'standalone' && (
-        <DeckGL
-          initialViewState={STANDALONE_VIEW_STATE}
-          controller={{ dragRotate: true, touchRotate: true, keyboard: true }}
-          layers={standaloneLayers}
-          onClick={handleStandaloneClick}
-          getTooltip={standaloneTooltip}
-          style={{ position: 'absolute', inset: 0 }}
-        />
-      )}
-
-      {/* ── MODE B: Google Maps 3D Satellite base layer ── */}
-      {(loadState === 'loading' || loadState === 'ready') && (
-        <div
-          ref={mapContainerRef}
-          style={{
-            width: '100%',
-            height: '100%',
-            position: 'absolute',
-            inset: 0,
-          }}
-        />
-      )}
-
-      {/* Loading state indicator (Google Maps mode) */}
-      {loadState === 'loading' && (
-        <div style={{
+      {/* Map Container Element */}
+      <div
+        ref={mapContainerRef}
+        style={{
+          width: '100%',
+          height: '100%',
           position: 'absolute',
-          top: 20,
-          left: '50%',
-          transform: 'translateX(-50%)',
-          backgroundColor: 'rgba(15, 23, 42, 0.9)',
-          backdropFilter: 'blur(8px)',
-          border: '1px solid rgba(56, 189, 248, 0.3)',
-          color: '#38bdf8',
-          padding: '8px 16px',
-          borderRadius: '24px',
-          fontSize: '0.82rem',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '8px',
-          zIndex: 20,
-          boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
-        }}>
-          <RefreshCw size={14} style={{ animation: 'spin 1.5s linear infinite' }} />
-          <span>Initializing Google 3D Satellite Map (T. Nagar, Chennai)…</span>
-        </div>
-      )}
+          inset: 0,
+        }}
+      />
 
-      {/* ── Location badge ── */}
+      {/* Provider Status / Location Badge */}
       <div style={{
         position: 'absolute',
         bottom: 12,
@@ -542,11 +519,28 @@ export default function MapComponent({
       }}>
         <MapPin size={12} style={{ color: '#ef4444' }} />
         <span>
-          {loadState === 'ready'
+          {activeProvider === 'google'
             ? 'Google 3D Satellite Map · T. Nagar, Chennai'
-            : 'Interactive Map · T. Nagar, Chennai'}
+            : activeProvider === 'maplibre'
+            ? '3D Aerial Satellite Map (Esri/MapLibre) · T. Nagar, Chennai'
+            : 'Loading Map Provider (T. Nagar, Chennai)…'}
         </span>
       </div>
+
+      {/* Esri & OpenStreetMap Data Attribution */}
+      {activeProvider === 'maplibre' && (
+        <div style={{
+          position: 'absolute',
+          bottom: 12,
+          left: 12,
+          color: 'rgba(255,255,255,0.4)',
+          fontSize: '0.65rem',
+          pointerEvents: 'none',
+          zIndex: 10,
+        }}>
+          © Esri, Maxar, Earthstar Geographics | OpenStreetMap
+        </div>
+      )}
     </div>
   );
 }
