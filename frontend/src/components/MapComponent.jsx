@@ -451,7 +451,7 @@ export default function MapComponent({
     maplibreInstanceRef.current = map;
 
     const deckOverlay = new MapboxOverlay({
-      interleaved: true,
+      interleaved: false,
       layers: buildSimulationLayers(),
       getTooltip: ({ object }) => {
         const html = buildTooltipHtml(object);

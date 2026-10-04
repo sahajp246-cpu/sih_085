@@ -737,7 +737,7 @@ class ScenarioEngine:
         best = None
         best_dist = float('inf')
         for node in self._road_graph:
-            d = _haversine(lat, node[1], lng, node[0])
+            d = _haversine(lat, lng, node[1], node[0])
             if d < best_dist:
                 best_dist = d
                 best = node
