@@ -1,12 +1,12 @@
 import React, { useState } from 'react';
-import { Navigation, AlertTriangle, Truck, Footprints, Bus, Siren } from 'lucide-react';
+import { Navigation, AlertTriangle, Truck, User, Bus, AlertCircle } from 'lucide-react';
 import { RISK_COLORS_HEX } from '../config/riskColors';
 
 const VEHICLE_OPTIONS = [
-  { id: 'pedestrian', label: 'Pedestrian', Icon: Footprints },
+  { id: 'pedestrian', label: 'Pedestrian', Icon: User },
   { id: 'car', label: 'Car', Icon: Truck },
   { id: 'bus', label: 'Bus', Icon: Bus },
-  { id: 'ambulance', label: 'Ambulance', Icon: Siren },
+  { id: 'ambulance', label: 'Ambulance', Icon: AlertCircle },
 ];
 
 export default function RoutingPanel({ onComputeRoute, onClear, routeResult, origin, destination }) {

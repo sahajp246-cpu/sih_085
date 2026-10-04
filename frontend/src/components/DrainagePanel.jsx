@@ -1,3 +1,4 @@
+import React from 'react';
 import { Waves, TrendingDown, Clock } from 'lucide-react';
 import { TIER_LABELS } from '../config/riskColors';
 
