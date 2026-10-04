@@ -10,7 +10,7 @@ import logging
 import os
 from typing import Annotated, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import ValidationError
 
@@ -102,7 +102,10 @@ class ConnectionManager:
 ws_manager = ConnectionManager()
 
 
-@app.get("/", tags=["Health"])
+router = APIRouter()
+
+
+@router.get("/", tags=["Health"])
 def root() -> Dict[str, str]:
     return {
         "service": "FloodTwin API",
@@ -111,7 +114,7 @@ def root() -> Dict[str, str]:
     }
 
 
-@app.get("/health", response_model=HealthResponse, tags=["Health"])
+@router.get("/health", response_model=HealthResponse, tags=["Health"])
 def health_check() -> HealthResponse:
     return HealthResponse(
         status="healthy",
@@ -127,7 +130,7 @@ def health_check() -> HealthResponse:
     )
 
 
-@app.post("/v1/simulation/step", response_model=SimulationState, tags=["Simulation"])
+@router.post("/v1/simulation/step", response_model=SimulationState, tags=["Simulation"])
 async def run_simulation_step(
     scenario: Annotated[str, Query(description="Rainfall scenario identifier")] = "baseline",
     time_min: Annotated[int, Query(ge=0, le=180, description="Timeline minute offset")] = 0,
@@ -150,12 +153,12 @@ async def run_simulation_step(
     return state
 
 
-@app.get("/v1/flood/segments", tags=["Flood Risk"])
+@router.get("/v1/flood/segments", tags=["Flood Risk"])
 def get_flood_segments() -> List[dict]:
     return [segment.model_dump() for segment in engine.state.roads]
 
 
-@app.get("/v1/flood/segments/{segment_id}", tags=["Flood Risk"])
+@router.get("/v1/flood/segments/{segment_id}", tags=["Flood Risk"])
 def get_flood_segment(segment_id: str) -> dict:
     segment = engine.get_segment(segment_id)
     if not segment:
@@ -163,18 +166,18 @@ def get_flood_segment(segment_id: str) -> dict:
     return segment.model_dump()
 
 
-@app.get("/v1/drainage/nodes", tags=["Drainage"])
+@router.get("/v1/drainage/nodes", tags=["Drainage"])
 def get_drainage_nodes() -> List[dict]:
     return [node.model_dump() for node in engine.state.nodes]
 
 
-@app.get("/v1/drainage/nodes/critical", tags=["Drainage"])
+@router.get("/v1/drainage/nodes/critical", tags=["Drainage"])
 def get_critical_nodes() -> List[dict]:
     critical_ids = set(engine.state.critical_nodes)
     return [node.model_dump() for node in engine.state.nodes if node.node_id in critical_ids]
 
 
-@app.get("/v1/drainage/nodes/{node_id}", tags=["Drainage"])
+@router.get("/v1/drainage/nodes/{node_id}", tags=["Drainage"])
 def get_drainage_node(node_id: str) -> dict:
     node = engine.get_node(node_id)
     if not node:
@@ -182,17 +185,17 @@ def get_drainage_node(node_id: str) -> dict:
     return node.model_dump()
 
 
-@app.get("/v1/drainage/edges", tags=["Drainage"])
+@router.get("/v1/drainage/edges", tags=["Drainage"])
 def get_drainage_edges() -> List[dict]:
     return [edge.model_dump() for edge in engine.state.edges]
 
 
-@app.get("/v1/rainfall/nowcast", response_model=NowcastState, tags=["Rainfall"])
+@router.get("/v1/rainfall/nowcast", response_model=NowcastState, tags=["Rainfall"])
 def get_nowcast() -> NowcastState:
     return engine.state.nowcast
 
 
-@app.post("/v1/drainage/whatif", response_model=WhatIfComparison, tags=["Analysis"])
+@router.post("/v1/drainage/whatif", response_model=WhatIfComparison, tags=["Analysis"])
 async def run_whatif(request: WhatIfRequest) -> WhatIfComparison:
     if not engine.get_node(request.node_id):
         raise HTTPException(status_code=404, detail=f"Drainage node '{request.node_id}' not found")
@@ -207,17 +210,17 @@ async def run_whatif(request: WhatIfRequest) -> WhatIfComparison:
     return result
 
 
-@app.post("/v1/route", response_model=RouteResponse, tags=["Routing"])
+@router.post("/v1/route", response_model=RouteResponse, tags=["Routing"])
 def compute_route(request: RouteRequest) -> RouteResponse:
     return engine.compute_route(request)
 
 
-@app.get("/v1/alerts", response_model=List[FloodAlert], tags=["Alerts"])
+@router.get("/v1/alerts", response_model=List[FloodAlert], tags=["Alerts"])
 def get_alerts() -> List[FloodAlert]:
     return engine.state.alerts
 
 
-@app.get("/v1/roads/closures", tags=["Roads"])
+@router.get("/v1/roads/closures", tags=["Roads"])
 def get_road_closures() -> List[dict]:
     return [
         {
@@ -229,6 +232,10 @@ def get_road_closures() -> List[dict]:
         for road in engine.state.roads
         if road.risk_level == RiskLevel.CRITICAL or road.risk_level == RiskLevel.HIGH
     ]
+
+
+app.include_router(router)
+app.include_router(router, prefix="/api")
 
 
 @app.websocket("/ws/stream")
