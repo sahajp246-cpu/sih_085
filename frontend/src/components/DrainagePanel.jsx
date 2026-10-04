@@ -1,7 +1,5 @@
-import React from 'react';
-import { Waves, AlertTriangle, Clock, TrendingDown } from 'lucide-react';
-
-const TIER_LABELS = { A: 'Verified', B: 'GIS-Derived', C: 'Estimated' };
+import { Waves, TrendingDown, Clock } from 'lucide-react';
+import { TIER_LABELS } from '../config/riskColors';
 
 export default function DrainagePanel({ nodes, criticalNodes, onNodeClick }) {
   const critical = nodes

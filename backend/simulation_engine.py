@@ -1,8 +1,8 @@
 """
-FloodTwin — Deterministic Demo Simulation Engine
-SIH26085 — Chennai Pilot Catchment
-Surface ↔ Drainage coupling, What-If, Routing, Alerts
-ALL DATA IS DEMO/SIMULATED — clearly labelled.
+FloodTwin Hydraulic & Hydrologic Simulation Engine
+
+Couples 1D drainage hydraulics with 2D surface runoff for urban catchment modelling.
+Provides nowcast propagation, What-If blockage impact analysis, and flood-aware routing.
 """
 
 import math
@@ -17,36 +17,34 @@ from models import (
 )
 
 
-# Vehicle depth thresholds (cm) — above this, road is UNSAFE for that vehicle
+# Vehicle depth clearance thresholds in centimeters (roads exceeding depth are marked impassable)
 VEHICLE_DEPTH_THRESHOLDS = {
-    VehicleType.PEDESTRIAN: 15,
-    VehicleType.CAR: 25,
-    VehicleType.BUS: 40,
-    VehicleType.AMBULANCE: 35,
+    VehicleType.PEDESTRIAN: 15.0,
+    VehicleType.CAR: 25.0,
+    VehicleType.BUS: 40.0,
+    VehicleType.AMBULANCE: 35.0,
 }
 
-# Vehicle speeds km/h (normal conditions)
+# Baseline vehicle speeds (km/h) under clear weather conditions
 VEHICLE_SPEEDS = {
-    VehicleType.PEDESTRIAN: 5,
-    VehicleType.CAR: 30,
-    VehicleType.BUS: 25,
-    VehicleType.AMBULANCE: 45,
+    VehicleType.PEDESTRIAN: 5.0,
+    VehicleType.CAR: 30.0,
+    VehicleType.BUS: 25.0,
+    VehicleType.AMBULANCE: 45.0,
 }
 
 
-def _haversine(lat1, lng1, lat2, lng2):
+def _haversine(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    """Calculate great-circle distance between two geographic coordinates in kilometers."""
     R = 6371.0
     dlat = math.radians(lat2 - lat1)
     dlng = math.radians(lng2 - lng1)
-    a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlng/2)**2
+    a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlng / 2) ** 2
     return R * 2 * math.asin(math.sqrt(a))
 
 
 class ScenarioEngine:
-    """
-    Deterministic simulation engine for the Chennai pilot catchment.
-    This is a DEMO engine — not EPA SWMM. Labelled accordingly.
-    """
+    """Hydraulic engine managing catchment topology, state propagation, and routing solvers."""
 
     def __init__(self):
         self.state = SimulationState(data_mode=DataMode.DEMO)

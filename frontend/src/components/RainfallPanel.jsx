@@ -2,7 +2,7 @@ import React from 'react';
 import { CloudRain, TrendingUp, Eye, BarChart3 } from 'lucide-react';
 
 export default function RainfallPanel({ nowcast }) {
-  if (!nowcast || !nowcast.current && nowcast.current !== 0) return null;
+  if (!nowcast || nowcast.current == null) return null;
 
   const intensityClass = nowcast.current > 60 ? 'risk-CRITICAL'
     : nowcast.current > 30 ? 'risk-HIGH'

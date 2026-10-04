@@ -1,10 +1,10 @@
-import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
 
-// https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react()],
   optimizeDeps: {
-    exclude: ['maplibre-gl']
-  }
-})
+    // deck.gl modules use dynamic imports that Vite needs to pre-bundle
+    include: ['@deck.gl/react', '@deck.gl/layers', '@deck.gl/aggregation-layers', '@deck.gl/google-maps'],
+  },
+});

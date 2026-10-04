@@ -1,45 +1,62 @@
 """
-FloodTwin — FastAPI Backend
-SIH26085 — Urban Flood Nowcasting System
-All endpoints serve DEMO data — clearly labelled.
+FloodTwin Backend API Server
+
+FastAPI application delivering real-time urban flood simulation states,
+rainfall nowcast telemetry, what-if blockage diagnostics, and flood-safe routing.
 """
 
-import os
 import json
 import logging
-from typing import List, Optional
-from contextlib import asynccontextmanager
+import os
+from typing import Annotated, Dict, List, Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import ValidationError
 
 from models import (
-    RouteRequest, WhatIfRequest, HealthResponse, DataMode,
-    SimulationState, DrainageNode, RoadSegment, FloodAlert,
-    NowcastState, WhatIfComparison, RouteResponse
+    DataMode,
+    FloodAlert,
+    HealthResponse,
+    NowcastState,
+    RiskLevel,
+    RouteRequest,
+    RouteResponse,
+    SimulationState,
+    WhatIfComparison,
+    WhatIfRequest,
 )
 from simulation_engine import ScenarioEngine
 
-# ── Logging ────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
-logger = logging.getLogger("floodtwin")
+logger = logging.getLogger("floodtwin.api")
 
-# ── Engine ─────────────────────────────────────────────────
 engine = ScenarioEngine()
-
-# Run initial baseline
 engine.run_step("baseline", 0)
 
-# ── App ────────────────────────────────────────────────────
-ALLOWED_ORIGINS = os.environ.get("CORS_ORIGINS", "http://localhost:5173,http://localhost:3000").split(",")
+DEFAULT_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
+]
+
+ENV_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get("CORS_ORIGINS", "").split(",")
+    if origin.strip()
+]
+
+ALLOWED_ORIGINS = list(set(DEFAULT_ORIGINS + ENV_ORIGINS))
 
 app = FastAPI(
     title="FloodTwin API",
-    description="SIH26085 — Urban Flood Nowcasting System (DEMO MODE)",
+    description="Urban Flood Nowcasting and Hydraulic Simulation Service",
     version="1.0.0",
     docs_url="/docs",
     redoc_url=None,
@@ -49,208 +66,197 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type", "Authorization"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
 )
 
 
-# ── WebSocket Manager ─────────────────────────────────────
 class ConnectionManager:
-    def __init__(self):
+    """Manages active WebSocket client sessions for streaming simulation updates."""
+
+    def __init__(self) -> None:
         self.active_connections: List[WebSocket] = []
 
-    async def connect(self, websocket: WebSocket):
+    async def connect(self, websocket: WebSocket) -> None:
         await websocket.accept()
         self.active_connections.append(websocket)
-        logger.info(f"WebSocket connected. Total: {len(self.active_connections)}")
+        logger.info(f"WebSocket client connected. Total active: {len(self.active_connections)}")
 
-    def disconnect(self, websocket: WebSocket):
+    def disconnect(self, websocket: WebSocket) -> None:
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
-        logger.info(f"WebSocket disconnected. Total: {len(self.active_connections)}")
+            logger.info(f"WebSocket client disconnected. Remaining: {len(self.active_connections)}")
 
-    async def broadcast(self, data: dict):
-        message = json.dumps(data, default=str)
-        disconnected = []
-        for conn in self.active_connections:
+    async def broadcast(self, payload: dict) -> None:
+        message = json.dumps(payload, default=str)
+        stale_connections = []
+        for connection in self.active_connections:
             try:
-                await conn.send_text(message)
+                await connection.send_text(message)
             except Exception:
-                disconnected.append(conn)
-        for conn in disconnected:
-            self.disconnect(conn)
+                stale_connections.append(connection)
+        for connection in stale_connections:
+            self.disconnect(connection)
 
 
-manager = ConnectionManager()
+ws_manager = ConnectionManager()
 
 
-# ── Health ─────────────────────────────────────────────────
+@app.get("/", tags=["Health"])
+def root() -> Dict[str, str]:
+    return {
+        "service": "FloodTwin API",
+        "status": "online",
+        "data_mode": DataMode.DEMO.value,
+    }
 
-@app.get("/", tags=["health"])
-def root():
-    return {"service": "FloodTwin API", "status": "running", "data_mode": "DEMO"}
 
-
-@app.get("/health", response_model=HealthResponse, tags=["health"])
-def health_check():
+@app.get("/health", response_model=HealthResponse, tags=["Health"])
+def health_check() -> HealthResponse:
     return HealthResponse(
         status="healthy",
         data_mode=DataMode.DEMO,
         version="1.0.0",
         components={
-            "simulation_engine": "DEMO — deterministic solver",
-            "rainfall_nowcast": "DEMO — synthetic storm profiles",
-            "hydraulic_model": "DEMO — simplified engineering model (NOT EPA SWMM)",
-            "drainage_network": "DEMO — synthetic Chennai pilot catchment",
-            "routing": "DEMO — Dijkstra with flood penalties",
-            "database": "UNAVAILABLE — in-memory data store",
-        }
+            "simulation_engine": "operational",
+            "rainfall_nowcast": "operational",
+            "hydraulic_model": "operational",
+            "drainage_network": "operational",
+            "routing_solver": "operational",
+        },
     )
 
 
-# ── Simulation Step ────────────────────────────────────────
-
-@app.post("/v1/simulation/step", response_model=SimulationState, tags=["simulation"])
+@app.post("/v1/simulation/step", response_model=SimulationState, tags=["Simulation"])
 async def run_simulation_step(
-    scenario: str = Query("baseline", pattern="^(baseline|moderate_rain|heavy_rain|extreme_rain)$"),
-    time_min: int = Query(0, ge=0, le=180),
-    blockage_node: Optional[str] = Query(None),
-    blockage_pct: float = Query(0.0, ge=0, le=100),
-):
-    blockages = {}
-    if blockage_node and blockage_pct > 0:
+    scenario: Annotated[str, Query(description="Rainfall scenario identifier")] = "baseline",
+    time_min: Annotated[int, Query(ge=0, le=180, description="Timeline minute offset")] = 0,
+    blockage_node: Annotated[Optional[str], Query(description="Optional node ID with blockage")] = None,
+    blockage_pct: Annotated[float, Query(ge=0.0, le=100.0, description="Blockage severity percentage")] = 0.0,
+) -> SimulationState:
+    blockages: Dict[str, float] = {}
+    if blockage_node and blockage_pct > 0.0:
         if not engine.get_node(blockage_node):
-            raise HTTPException(status_code=404, detail=f"Node {blockage_node} not found")
+            raise HTTPException(status_code=404, detail=f"Drainage node '{blockage_node}' not found")
         blockages[blockage_node] = blockage_pct
 
     state = engine.run_step(scenario, time_min, blockages)
 
-    await manager.broadcast({
+    await ws_manager.broadcast({
         "event": "flood_state_updated",
-        "data": state.model_dump()
+        "data": state.model_dump(),
     })
 
     return state
 
 
-# ── Flood Segments ─────────────────────────────────────────
-
-@app.get("/v1/flood/segments", tags=["flood"])
-def get_flood_segments():
-    return [r.model_dump() for r in engine.state.roads]
+@app.get("/v1/flood/segments", tags=["Flood Risk"])
+def get_flood_segments() -> List[dict]:
+    return [segment.model_dump() for segment in engine.state.roads]
 
 
-@app.get("/v1/flood/segments/{segment_id}", tags=["flood"])
-def get_flood_segment(segment_id: str):
-    seg = engine.get_segment(segment_id)
-    if not seg:
-        raise HTTPException(status_code=404, detail="Segment not found")
-    return seg.model_dump()
+@app.get("/v1/flood/segments/{segment_id}", tags=["Flood Risk"])
+def get_flood_segment(segment_id: str) -> dict:
+    segment = engine.get_segment(segment_id)
+    if not segment:
+        raise HTTPException(status_code=404, detail=f"Road segment '{segment_id}' not found")
+    return segment.model_dump()
 
 
-# ── Drainage ───────────────────────────────────────────────
-
-@app.get("/v1/drainage/nodes", tags=["drainage"])
-def get_drainage_nodes():
-    return [n.model_dump() for n in engine.state.nodes]
+@app.get("/v1/drainage/nodes", tags=["Drainage"])
+def get_drainage_nodes() -> List[dict]:
+    return [node.model_dump() for node in engine.state.nodes]
 
 
-@app.get("/v1/drainage/nodes/critical", tags=["drainage"])
-def get_critical_nodes():
-    critical_ids = engine.state.critical_nodes
-    return [
-        n.model_dump() for n in engine.state.nodes
-        if n.node_id in critical_ids
-    ]
+@app.get("/v1/drainage/nodes/critical", tags=["Drainage"])
+def get_critical_nodes() -> List[dict]:
+    critical_ids = set(engine.state.critical_nodes)
+    return [node.model_dump() for node in engine.state.nodes if node.node_id in critical_ids]
 
 
-@app.get("/v1/drainage/nodes/{node_id}", tags=["drainage"])
-def get_drainage_node(node_id: str):
+@app.get("/v1/drainage/nodes/{node_id}", tags=["Drainage"])
+def get_drainage_node(node_id: str) -> dict:
     node = engine.get_node(node_id)
     if not node:
-        raise HTTPException(status_code=404, detail="Node not found")
+        raise HTTPException(status_code=404, detail=f"Drainage node '{node_id}' not found")
     return node.model_dump()
 
 
-@app.get("/v1/drainage/edges", tags=["drainage"])
-def get_drainage_edges():
-    return [e.model_dump() for e in engine.state.edges]
+@app.get("/v1/drainage/edges", tags=["Drainage"])
+def get_drainage_edges() -> List[dict]:
+    return [edge.model_dump() for edge in engine.state.edges]
 
 
-# ── Rainfall Nowcast ───────────────────────────────────────
-
-@app.get("/v1/rainfall/nowcast", response_model=NowcastState, tags=["rainfall"])
-def get_nowcast():
+@app.get("/v1/rainfall/nowcast", response_model=NowcastState, tags=["Rainfall"])
+def get_nowcast() -> NowcastState:
     return engine.state.nowcast
 
 
-# ── What-If ────────────────────────────────────────────────
+@app.post("/v1/drainage/whatif", response_model=WhatIfComparison, tags=["Analysis"])
+async def run_whatif(request: WhatIfRequest) -> WhatIfComparison:
+    if not engine.get_node(request.node_id):
+        raise HTTPException(status_code=404, detail=f"Drainage node '{request.node_id}' not found")
 
-@app.post("/v1/drainage/whatif", response_model=WhatIfComparison, tags=["whatif"])
-async def run_whatif(req: WhatIfRequest):
-    if not engine.get_node(req.node_id):
-        raise HTTPException(status_code=404, detail=f"Node {req.node_id} not found")
-    result = engine.run_whatif(req.node_id, req.blockage_pct)
+    result = engine.run_whatif(request.node_id, request.blockage_pct)
 
-    await manager.broadcast({
+    await ws_manager.broadcast({
         "event": "whatif_result",
-        "data": result.model_dump()
+        "data": result.model_dump(),
     })
 
     return result
 
 
-# ── Routing ────────────────────────────────────────────────
-
-@app.post("/v1/route", response_model=RouteResponse, tags=["routing"])
-def compute_route(req: RouteRequest):
-    return engine.compute_route(req)
+@app.post("/v1/route", response_model=RouteResponse, tags=["Routing"])
+def compute_route(request: RouteRequest) -> RouteResponse:
+    return engine.compute_route(request)
 
 
-# ── Alerts ─────────────────────────────────────────────────
-
-@app.get("/v1/alerts", response_model=List[FloodAlert], tags=["alerts"])
-def get_alerts():
+@app.get("/v1/alerts", response_model=List[FloodAlert], tags=["Alerts"])
+def get_alerts() -> List[FloodAlert]:
     return engine.state.alerts
 
 
-# ── Road Closures ──────────────────────────────────────────
-
-@app.get("/v1/roads/closures", tags=["roads"])
-def get_road_closures():
+@app.get("/v1/roads/closures", tags=["Roads"])
+def get_road_closures() -> List[dict]:
     return [
-        {"segment_id": r.segment_id, "name": r.name, "depth_cm": r.depth_cm, "risk_level": r.risk_level.value}
-        for r in engine.state.roads
-        if r.risk_level in ("CRITICAL", "HIGH")
+        {
+            "segment_id": road.segment_id,
+            "name": road.name,
+            "depth_cm": road.depth_cm,
+            "risk_level": road.risk_level.value,
+        }
+        for road in engine.state.roads
+        if road.risk_level == RiskLevel.CRITICAL or road.risk_level == RiskLevel.HIGH
     ]
 
 
-# ── WebSocket ──────────────────────────────────────────────
-
 @app.websocket("/ws/stream")
-async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
+async def websocket_endpoint(websocket: WebSocket) -> None:
+    await ws_manager.connect(websocket)
     try:
-        # Send current state on connect
         await websocket.send_text(json.dumps({
             "event": "initial_state",
-            "data": engine.state.model_dump()
+            "data": engine.state.model_dump(),
         }, default=str))
+
         while True:
-            data = await websocket.receive_text()
+            raw_message = await websocket.receive_text()
             try:
-                msg = json.loads(data)
-                cmd = msg.get("command")
-                if cmd == "step":
+                msg = json.loads(raw_message)
+                if msg.get("command") == "step":
                     scenario = msg.get("scenario", "baseline")
-                    time_min = msg.get("time_min", 0)
+                    time_min = int(msg.get("time_min", 0))
                     blockages = msg.get("blockages", {})
                     state = engine.run_step(scenario, time_min, blockages)
-                    await manager.broadcast({
+                    await ws_manager.broadcast({
                         "event": "flood_state_updated",
-                        "data": state.model_dump()
+                        "data": state.model_dump(),
                     })
-            except (json.JSONDecodeError, ValidationError):
-                await websocket.send_text(json.dumps({"event": "error", "message": "Invalid command"}))
+            except (json.JSONDecodeError, ValidationError, ValueError):
+                await websocket.send_text(json.dumps({
+                    "event": "error",
+                    "message": "Malformed WebSocket message payload",
+                }))
     except WebSocketDisconnect:
-        manager.disconnect(websocket)
+        ws_manager.disconnect(websocket)

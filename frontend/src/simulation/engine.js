@@ -1,10 +1,7 @@
 /**
- * FloodTwin — Client-Side Deterministic Simulation Engine
- * SIH26085 — Chennai Pilot Catchment (DEMO MODE)
- * 
- * Mirrors backend logic for offline/instant UI updates.
- * 15 drainage nodes, 14 edges, 12 road segments.
- * Surface ↔ Drainage coupling, Dijkstra routing, What-If.
+ * Client-side deterministic simulation engine.
+ * Mirrors backend hydraulic logic for instant UI updates without a network round-trip.
+ * Contains the synthetic Chennai T. Nagar pilot catchment (demo data).
  */
 
 const VEHICLE_THRESHOLDS = { pedestrian: 15, car: 25, bus: 40, ambulance: 35 };
@@ -34,6 +31,7 @@ class SimulationEngine {
     this.nodeMap = {};
     this.roadMap = {};
     this.roadGraph = {};
+    this._routeSequence = 0;
     this._initChennaiCatchment();
   }
 
@@ -262,7 +260,8 @@ class SimulationEngine {
       } else node.ttc = null;
     });
 
-    // Downstream impact count
+    // Count reachable downstream nodes for each node via BFS.
+    // O(n * (n + e)) over the network — acceptable for the 15-node pilot catchment.
     this.state.nodes.forEach(node => {
       let count = 0;
       const visited = new Set();
@@ -402,7 +401,10 @@ class SimulationEngine {
 
   // ── What-If ───────────────────────────────────────────
   runWhatIf(nodeId, blockagePct) {
-    // Capture before
+    // 1. Run Baseline (0% blockage) to ensure we always compare against normal
+    this.runStep(this.state.scenario, this.state.timeMin, {});
+    
+    // Capture baseline state
     const beforeRoads = {};
     this.state.roads.forEach(r => {
       beforeRoads[r.id] = { depth: r.depthCm, risk: r.risk, ttf: r.ttf };
@@ -410,7 +412,7 @@ class SimulationEngine {
     const bNode = this.nodeMap[nodeId];
     const beforeUtil = bNode ? bNode.utilPct : 0;
 
-    // Run with blockage
+    // 2. Run with blockage
     const blockages = { [nodeId]: blockagePct };
     this.runStep(this.state.scenario, this.state.timeMin, blockages);
 
@@ -419,7 +421,7 @@ class SimulationEngine {
     const affected = this.state.roads.filter(r => {
       const prev = beforeRoads[r.id];
       return prev && r.depthCm > prev.depth + 2;
-    }).map(r => r.id);
+    }).map(r => ({ id: r.id, name: r.name, beforeDepth: beforeRoads[r.id].depth, afterDepth: r.depthCm }));
 
     return {
       nodeId, blockagePct,
@@ -519,8 +521,9 @@ class SimulationEngine {
 
     const eta = speed > 0 ? (totalDist / speed) * 60 : 0;
 
+    this._routeSequence += 1;
     return {
-      routeId: Math.random().toString(36).substring(2, 10),
+      routeId: `route-${this._routeSequence}`,
       vehicle: vehicleType,
       path,
       distance: +totalDist.toFixed(2),

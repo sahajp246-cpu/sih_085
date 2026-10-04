@@ -1,12 +1,9 @@
 import React from 'react';
 import { X, MapPin, Droplets, Clock, AlertTriangle, BarChart3, Waves, Shield, Info } from 'lucide-react';
-
-const RISK_COLORS = { SAFE: '#10b981', CAUTION: '#f59e0b', HIGH: '#f97316', CRITICAL: '#ef4444' };
-const TIER_LABELS = { A: 'Verified Municipal', B: 'GIS-Derived', C: 'Estimated/Synthetic' };
+import { RISK_COLORS_HEX, TIER_LABELS } from '../config/riskColors';
 
 export default function DetailPanel({ type, data, onClose }) {
   if (!data) return null;
-
   if (type === 'road') return <RoadDetail road={data} onClose={onClose} />;
   if (type === 'node') return <NodeDetail node={data} onClose={onClose} />;
   return null;
@@ -14,6 +11,7 @@ export default function DetailPanel({ type, data, onClose }) {
 
 function RoadDetail({ road, onClose }) {
   const cb = road.causeBreakdown || {};
+
   return (
     <div className="detail-panel">
       <div className="detail-header">
@@ -21,7 +19,7 @@ function RoadDetail({ road, onClose }) {
           <h3><MapPin size={14} /> {road.name}</h3>
           <span className="detail-id">{road.id}</span>
         </div>
-        <button className="close-btn" onClick={onClose}><X size={16} /></button>
+        <button className="close-btn" onClick={onClose} aria-label="Close detail panel"><X size={16} /></button>
       </div>
 
       <div className={`risk-banner risk-bg-${road.risk.toLowerCase()}`}>
@@ -34,7 +32,7 @@ function RoadDetail({ road, onClose }) {
           <Droplets size={14} />
           <div>
             <span className="stat-label">Predicted Depth</span>
-            <span className="stat-value" style={{ color: RISK_COLORS[road.risk] }}>
+            <span className="stat-value" style={{ color: RISK_COLORS_HEX[road.risk] }}>
               {road.depthCm.toFixed(1)} cm
             </span>
             <span className="stat-range">[{road.depthLower.toFixed(1)} – {road.depthUpper.toFixed(1)} cm]</span>
@@ -84,12 +82,16 @@ function RoadDetail({ road, onClose }) {
             ['&gt; 50 cm', road.prob50],
           ].map(([label, val]) => (
             <div key={label} className="prob-item">
-              <span>{label}</span>
+              {/* eslint-disable-next-line react/no-danger */}
+              <span dangerouslySetInnerHTML={{ __html: label }} />
               <div className="prob-bar-bg">
-                <div className="prob-bar-fill" style={{
-                  width: `${val}%`,
-                  background: val > 70 ? 'var(--risk-critical)' : val > 40 ? 'var(--risk-high)' : 'var(--accent-cyan)',
-                }} />
+                <div
+                  className="prob-bar-fill"
+                  style={{
+                    width: `${val}%`,
+                    background: val > 70 ? 'var(--risk-critical)' : val > 40 ? 'var(--risk-high)' : 'var(--accent-cyan)',
+                  }}
+                />
               </div>
               <span className="prob-val">{val.toFixed(0)}%</span>
             </div>
@@ -125,7 +127,7 @@ function NodeDetail({ node, onClose }) {
           <h3><Waves size={14} /> Node {node.id}</h3>
           <span className="detail-id">{node.type}</span>
         </div>
-        <button className="close-btn" onClick={onClose}><X size={16} /></button>
+        <button className="close-btn" onClick={onClose} aria-label="Close detail panel"><X size={16} /></button>
       </div>
 
       <div className={`risk-banner status-bg-${node.status.toLowerCase()}`}>
@@ -143,6 +145,7 @@ function NodeDetail({ node, onClose }) {
             </span>
           </div>
         </div>
+
         <div className="detail-stat">
           <Droplets size={14} />
           <div>
@@ -150,6 +153,7 @@ function NodeDetail({ node, onClose }) {
             <span className="stat-value">{node.flow.toFixed(0)} / {node.capacity} L/s</span>
           </div>
         </div>
+
         {node.ttc != null && (
           <div className="detail-stat">
             <Clock size={14} />
@@ -161,6 +165,7 @@ function NodeDetail({ node, onClose }) {
             </div>
           </div>
         )}
+
         <div className="detail-stat">
           <Waves size={14} />
           <div>

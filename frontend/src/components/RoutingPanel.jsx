@@ -1,32 +1,25 @@
 import React, { useState } from 'react';
-import { Navigation, Shield, AlertTriangle, Truck, Footprints, Bus, Siren } from 'lucide-react';
+import { Navigation, AlertTriangle, Truck, Footprints, Bus, Siren } from 'lucide-react';
+import { RISK_COLORS_HEX } from '../config/riskColors';
 
-const VEHICLE_ICONS = {
-  pedestrian: Footprints,
-  car: Truck,
-  bus: Bus,
-  ambulance: Siren,
-};
-
-const RISK_COLORS = { SAFE: '#10b981', CAUTION: '#f59e0b', HIGH: '#f97316', CRITICAL: '#ef4444' };
-
-// Predefined origin/destination pairs for the Chennai pilot catchment
-const PRESETS = [
-  { label: 'Thyagaraya Rd → Canal Bank', oLat: 13.0382, oLng: 80.2340, dLat: 13.0448, dLng: 80.2345 },
-  { label: 'South Mada → Usman Rd', oLat: 13.0375, oLng: 80.2365, dLat: 13.0420, dLng: 80.2342 },
-  { label: 'Panagal Park → Natesan St', oLat: 13.0390, oLng: 80.2355, dLat: 13.0425, dLng: 80.2360 },
+const VEHICLE_OPTIONS = [
+  { id: 'pedestrian', label: 'Pedestrian', Icon: Footprints },
+  { id: 'car', label: 'Car', Icon: Truck },
+  { id: 'bus', label: 'Bus', Icon: Bus },
+  { id: 'ambulance', label: 'Ambulance', Icon: Siren },
 ];
 
-export default function RoutingPanel({ onComputeRoute, routeResult }) {
+export default function RoutingPanel({ onComputeRoute, onClear, routeResult, origin, destination }) {
   const [vehicle, setVehicle] = useState('ambulance');
-  const [preset, setPreset] = useState(0);
 
-  const handleRoute = () => {
-    const p = PRESETS[preset];
-    onComputeRoute(p.oLat, p.oLng, p.dLat, p.dLng, vehicle);
+  const handleFindRoute = () => {
+    if (origin && destination) {
+      onComputeRoute(vehicle);
+    }
   };
 
-  const VIcon = VEHICLE_ICONS[vehicle] || Truck;
+  const selectedVehicle = VEHICLE_OPTIONS.find((v) => v.id === vehicle);
+  const VIcon = selectedVehicle?.Icon || Truck;
 
   return (
     <div className="sub-panel">
@@ -37,37 +30,49 @@ export default function RoutingPanel({ onComputeRoute, routeResult }) {
       </h3>
 
       <div className="routing-controls">
-        <label className="control-label">
-          Route
-          <select value={preset} onChange={e => setPreset(parseInt(e.target.value))}>
-            {PRESETS.map((p, i) => (
-              <option key={i} value={i}>{p.label}</option>
-            ))}
-          </select>
-        </label>
+        <p className="routing-instructions">
+          <strong>Interactive Mode:</strong> Click on the map to select your Origin and Destination.
+        </p>
+
+        <div className="routing-waypoints">
+          <div className={`routing-waypoint ${origin ? 'routing-waypoint--set' : ''}`}>
+            <div className="routing-waypoint-label origin">ORIGIN</div>
+            <div className="routing-waypoint-value">{origin ? 'Selected' : 'Tap on map…'}</div>
+          </div>
+          <div className={`routing-waypoint ${destination ? 'routing-waypoint--set routing-waypoint--dest' : ''}`}>
+            <div className="routing-waypoint-label destination">DESTINATION</div>
+            <div className="routing-waypoint-value">{destination ? 'Selected' : 'Tap on map…'}</div>
+          </div>
+        </div>
 
         <label className="control-label">Vehicle Type</label>
         <div className="vehicle-selector">
-          {Object.keys(VEHICLE_ICONS).map(v => {
-            const Icon = VEHICLE_ICONS[v];
-            return (
-              <button
-                key={v}
-                className={`vehicle-btn ${vehicle === v ? 'active' : ''}`}
-                onClick={() => setVehicle(v)}
-                title={v}
-              >
-                <Icon size={16} />
-                <span>{v}</span>
-              </button>
-            );
-          })}
+          {VEHICLE_OPTIONS.map(({ id, label, Icon }) => (
+            <button
+              key={id}
+              className={`vehicle-btn ${vehicle === id ? 'active' : ''}`}
+              onClick={() => setVehicle(id)}
+              title={label}
+            >
+              <Icon size={16} />
+              <span>{label}</span>
+            </button>
+          ))}
         </div>
 
-        <button className="simulate-btn" onClick={handleRoute}>
-          <Navigation size={14} />
-          FIND SAFE ROUTE
-        </button>
+        <div className="routing-actions">
+          <button
+            className="simulate-btn routing-find-btn"
+            onClick={handleFindRoute}
+            disabled={!origin || !destination}
+          >
+            <Navigation size={14} />
+            FIND ROUTE
+          </button>
+          <button className="simulate-btn routing-clear-btn" onClick={onClear}>
+            CLEAR
+          </button>
+        </div>
       </div>
 
       {routeResult && (
@@ -91,7 +96,7 @@ export default function RoutingPanel({ onComputeRoute, routeResult }) {
             </div>
             <div>
               <span className="stat-label">Safety</span>
-              <span className="stat-value" style={{ color: RISK_COLORS[routeResult.risk] }}>
+              <span className="stat-value" style={{ color: RISK_COLORS_HEX[routeResult.risk] }}>
                 {routeResult.safety.toFixed(0)}%
               </span>
             </div>
@@ -104,8 +109,8 @@ export default function RoutingPanel({ onComputeRoute, routeResult }) {
           {routeResult.avoided?.length > 0 && (
             <div className="avoided-section">
               <h4><AlertTriangle size={12} /> Avoided Segments ({routeResult.avoided.length})</h4>
-              {routeResult.reasons.map((r, i) => (
-                <div key={i} className="avoided-reason">{r}</div>
+              {routeResult.reasons.map((reason, i) => (
+                <div key={i} className="avoided-reason">{reason}</div>
               ))}
             </div>
           )}

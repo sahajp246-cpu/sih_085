@@ -1,15 +1,14 @@
 """
-FloodTwin — Pydantic Models
-SIH26085 — Urban Flood Nowcasting System (Drainage and Rainfall Coupling)
-All simulation state, API request/response models.
+FloodTwin Backend Domain Models
+
+Pydantic schemas for simulation state, drainage networks, rainfall nowcasting,
+what-if scenario evaluations, and flood-aware routing requests.
 """
 
-from pydantic import BaseModel, Field, field_validator
-from typing import List, Optional
 from enum import Enum
+from typing import Dict, List, Optional
+from pydantic import BaseModel, Field, field_validator
 
-
-# ── Enums ──────────────────────────────────────────────────
 
 class RiskLevel(str, Enum):
     SAFE = "SAFE"
@@ -26,9 +25,9 @@ class NodeStatus(str, Enum):
 
 
 class ConfidenceTier(str, Enum):
-    A = "A"  # Verified municipal data
-    B = "B"  # GIS/engineering-derived
-    C = "C"  # Estimated/synthetic
+    A = "A"  # Verified municipal / sensor data
+    B = "B"  # GIS / elevation model derived
+    C = "C"  # Estimated / synthetic baseline
 
 
 class VehicleType(str, Enum):
@@ -50,8 +49,6 @@ class DataMode(str, Enum):
     UNAVAILABLE = "UNAVAILABLE"
 
 
-# ── Drainage Graph ─────────────────────────────────────────
-
 class DrainageNode(BaseModel):
     node_id: str
     node_type: str  # inlet, junction, manhole, outfall, storage
@@ -60,12 +57,12 @@ class DrainageNode(BaseModel):
     elevation_m: float = 0.0
     rim_elevation_m: float = 0.0
     invert_elevation_m: float = 0.0
-    capacity_lps: float = 100.0  # litres per second
+    capacity_lps: float = 100.0
     current_flow_lps: float = 0.0
     utilisation_pct: float = 0.0
     hydraulic_head_m: float = 0.0
     depth_m: float = 0.0
-    surface_exchange_lps: float = 0.0  # +ve = surface→drain, -ve = drain→surface (surcharge)
+    surface_exchange_lps: float = 0.0
     time_to_critical_min: Optional[int] = None
     status: NodeStatus = NodeStatus.NORMAL
     cause: Optional[str] = None
@@ -82,7 +79,7 @@ class DrainageEdge(BaseModel):
     length_m: float = 50.0
     diameter_mm: float = 600.0
     slope_pct: float = 0.5
-    roughness_n: float = 0.013  # Manning's n
+    roughness_n: float = 0.013  # Manning's roughness
     capacity_lps: float = 100.0
     current_flow_lps: float = 0.0
     utilisation_pct: float = 0.0
@@ -90,8 +87,6 @@ class DrainageEdge(BaseModel):
     status: NodeStatus = NodeStatus.NORMAL
     confidence_tier: ConfidenceTier = ConfidenceTier.A
 
-
-# ── Roads ──────────────────────────────────────────────────
 
 class CauseBreakdown(BaseModel):
     rainfall_pct: float = 0.0
@@ -124,8 +119,6 @@ class RoadSegment(BaseModel):
     imperviousness_pct: float = 70.0
 
 
-# ── Rainfall / Nowcast ─────────────────────────────────────
-
 class RainfallCell(BaseModel):
     lat: float
     lng: float
@@ -140,17 +133,15 @@ class NowcastState(BaseModel):
     forecast_intensity_mm_h: float = 0.0
     peak_intensity_mm_h: float = 0.0
     cumulative_mm: float = 0.0
-    probability_heavy: float = 0.0  # P(>30mm/h)
-    probability_extreme: float = 0.0  # P(>60mm/h)
+    probability_heavy: float = 0.0
+    probability_extreme: float = 0.0
     lead_time_min: int = 0
     confidence_pct: float = 0.0
     data_mode: DataMode = DataMode.DEMO
-    method: str = "Optical-flow extrapolation + ML refinement (DEMO)"
+    method: str = "Optical-flow extrapolation with ML refinement"
     cells: List[RainfallCell] = []
-    forecast_timeline: List[float] = []  # mm/h at each 5-min step
+    forecast_timeline: List[float] = []
 
-
-# ── Routing ────────────────────────────────────────────────
 
 class RouteRequest(BaseModel):
     origin_lat: float
@@ -159,19 +150,19 @@ class RouteRequest(BaseModel):
     dest_lng: float
     vehicle_type: VehicleType = VehicleType.CAR
 
-    @field_validator('origin_lat', 'dest_lat')
+    @field_validator("origin_lat", "dest_lat")
     @classmethod
-    def validate_lat(cls, v):
-        if not -90 <= v <= 90:
-            raise ValueError('Latitude must be between -90 and 90')
-        return v
+    def validate_latitude(cls, value: float) -> float:
+        if not -90.0 <= value <= 90.0:
+            raise ValueError("Latitude must be between -90 and 90 degrees")
+        return value
 
-    @field_validator('origin_lng', 'dest_lng')
+    @field_validator("origin_lng", "dest_lng")
     @classmethod
-    def validate_lng(cls, v):
-        if not -180 <= v <= 180:
-            raise ValueError('Longitude must be between -180 and 180')
-        return v
+    def validate_longitude(cls, value: float) -> float:
+        if not -180.0 <= value <= 180.0:
+            raise ValueError("Longitude must be between -180 and 180 degrees")
+        return value
 
 
 class RouteStep(BaseModel):
@@ -194,18 +185,16 @@ class RouteResponse(BaseModel):
     is_safe: bool = True
 
 
-# ── What-If ────────────────────────────────────────────────
-
 class WhatIfRequest(BaseModel):
     node_id: str
-    blockage_pct: float = Field(ge=0, le=100)
+    blockage_pct: float = Field(ge=0.0, le=100.0)
 
-    @field_validator('blockage_pct')
+    @field_validator("blockage_pct")
     @classmethod
-    def validate_blockage(cls, v):
-        if not 0 <= v <= 100:
-            raise ValueError('Blockage must be between 0 and 100')
-        return v
+    def validate_blockage(cls, value: float) -> float:
+        if not 0.0 <= value <= 100.0:
+            raise ValueError("Blockage percentage must be between 0 and 100")
+        return value
 
 
 class WhatIfComparison(BaseModel):
@@ -217,13 +206,11 @@ class WhatIfComparison(BaseModel):
     after_utilisation_pct: float
     before_risk: RiskLevel
     after_risk: RiskLevel
-    before_time_to_flood_min: Optional[int]
-    after_time_to_flood_min: Optional[int]
+    before_time_to_flood_min: Optional[int] = None
+    after_time_to_flood_min: Optional[int] = None
     additional_affected_roads: List[str] = []
     affected_nodes: List[str] = []
 
-
-# ── Alerts ─────────────────────────────────────────────────
 
 class FloodAlert(BaseModel):
     alert_id: str
@@ -236,8 +223,6 @@ class FloodAlert(BaseModel):
     is_active: bool = True
 
 
-# ── Complete Simulation State ──────────────────────────────
-
 class SimulationState(BaseModel):
     scenario: str = "baseline"
     time_min: int = 0
@@ -245,13 +230,13 @@ class SimulationState(BaseModel):
     nodes: List[DrainageNode] = []
     edges: List[DrainageEdge] = []
     roads: List[RoadSegment] = []
-    nowcast: NowcastState = NowcastState()
+    nowcast: NowcastState = Field(default_factory=NowcastState)
     alerts: List[FloodAlert] = []
-    critical_nodes: List[str] = []  # sorted by severity
+    critical_nodes: List[str] = []
 
 
 class HealthResponse(BaseModel):
     status: str = "healthy"
     data_mode: DataMode = DataMode.DEMO
     version: str = "1.0.0"
-    components: dict = {}
+    components: Dict[str, str] = Field(default_factory=dict)

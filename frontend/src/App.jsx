@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { engine } from './simulation/engine';
+import { checkBackendHealth, fetchSimulationStep } from './services/api';
 import MapComponent from './components/MapComponent';
 import RainfallPanel from './components/RainfallPanel';
 import DrainagePanel from './components/DrainagePanel';
@@ -10,7 +11,7 @@ import AlertsPanel from './components/AlertsPanel';
 import LayerControl from './components/LayerControl';
 import {
   Activity, Play, Pause, SkipBack, ChevronLeft, ChevronRight,
-  CloudRain, Waves, Navigation, AlertTriangle, Settings, Radio
+  CloudRain, Waves, Navigation, AlertTriangle, Radio,
 } from 'lucide-react';
 
 const TABS = [
@@ -21,51 +22,83 @@ const TABS = [
   { id: 'alerts', label: 'Alerts', icon: Radio },
 ];
 
+const TIMELINE_MARKS = [0, 30, 60, 90, 120, 150, 180];
+const TIMELINE_MAX_MINUTES = 180;
+const TIMELINE_STEP_MINUTES = 5;
+const PLAYBACK_INTERVAL_MS = 600;
+
+const DEFAULT_LAYERS = {
+  roads: true,
+  floodRisk: true,
+  floodDepth: true,
+  rainfall: true,
+  drainage: true,
+  drainageNodes: true,
+  criticalNodes: true,
+};
+
 function App() {
   const [scenario, setScenario] = useState('heavy_rain');
   const [timeMin, setTimeMin] = useState(0);
   const [blockages, setBlockages] = useState({});
   const [simState, setSimState] = useState(() => engine.runStep('heavy_rain', 0));
   const [isPlaying, setIsPlaying] = useState(false);
+  const [isBackendLive, setIsBackendLive] = useState(false);
 
-  // UI state
+  // Check backend connectivity on mount
+  useEffect(() => {
+    checkBackendHealth().then((connected) => {
+      setIsBackendLive(connected);
+    });
+  }, []);
+
+  // Panel / UI state
   const [activeTab, setActiveTab] = useState('rainfall');
-  const [leftOpen, setLeftOpen] = useState(true);
+  const [isLeftPanelOpen, setIsLeftPanelOpen] = useState(true);
   const [detailType, setDetailType] = useState(null);
   const [detailData, setDetailData] = useState(null);
-  const [comparison, setComparison] = useState(null);
+  const [whatIfComparison, setWhatIfComparison] = useState(null);
   const [routeResult, setRouteResult] = useState(null);
   const [routePath, setRoutePath] = useState(null);
+  const [routingOrigin, setRoutingOrigin] = useState(null);
+  const [routingDestination, setRoutingDestination] = useState(null);
+  const [enabledLayers, setEnabledLayers] = useState(DEFAULT_LAYERS);
 
-  const [enabledLayers, setEnabledLayers] = useState({
-    roads: true,
-    floodRisk: true,
-    floodDepth: true,
-    rainfall: true,
-    drainage: true,
-    drainageNodes: true,
-    criticalNodes: true,
-  });
-
-  // Run simulation when params change
+  // Re-run simulation whenever scenario, time, or blockages change
   useEffect(() => {
-    const newState = engine.runStep(scenario, timeMin, blockages);
-    setSimState(newState);
+    let isSubscribed = true;
+    fetchSimulationStep(scenario, timeMin, blockages).then((newState) => {
+      if (isSubscribed && newState) {
+        setSimState(newState);
+      }
+    }).catch((err) => {
+      console.error('Simulation step failed:', err);
+    });
+
+    return () => { isSubscribed = false; };
   }, [scenario, timeMin, blockages]);
 
-  // Auto-play timeline
+  // Auto-advance timeline during playback
   useEffect(() => {
-    let interval;
-    if (isPlaying) {
-      interval = setInterval(() => {
-        setTimeMin(t => {
-          if (t >= 180) { setIsPlaying(false); return t; }
-          return t + 5;
-        });
-      }, 600);
-    }
+    if (!isPlaying) return;
+    const interval = setInterval(() => {
+      setTimeMin((t) => {
+        if (t >= TIMELINE_MAX_MINUTES) { setIsPlaying(false); return t; }
+        return t + TIMELINE_STEP_MINUTES;
+      });
+    }, PLAYBACK_INTERVAL_MS);
     return () => clearInterval(interval);
   }, [isPlaying]);
+
+  const handleScenarioChange = useCallback((e) => {
+    setScenario(e.target.value);
+    setTimeMin(0);
+    setIsPlaying(false);
+    setBlockages({});
+    setWhatIfComparison(null);
+    setRouteResult(null);
+    setRoutePath(null);
+  }, []);
 
   const handleNodeClick = useCallback((node) => {
     setDetailType('node');
@@ -83,57 +116,69 @@ function App() {
   }, []);
 
   const handleWhatIf = useCallback((nodeId, blockagePct) => {
-    // Save baseline first
-    const baseState = engine.runStep(scenario, timeMin, {});
-    const beforeRoad = baseState.roads.find(r => r.nodeId === nodeId);
-    const beforeNode = baseState.nodes.find(n => n.id === nodeId);
-
-    // Run with blockage
-    const newBlockages = { [nodeId]: blockagePct };
-    const newState = engine.runStep(scenario, timeMin, newBlockages);
-    setSimState(newState);
-    setBlockages(newBlockages);
-
-    const afterRoad = newState.roads.find(r => r.nodeId === nodeId);
-    const afterNode = newState.nodes.find(n => n.id === nodeId);
-
-    const affectedRoads = newState.roads.filter((r, i) => {
-      const br = baseState.roads[i];
-      return r.depthCm > (br?.depthCm || 0) + 2;
-    }).map(r => r.id);
-
-    setComparison({
-      nodeId, blockagePct,
-      beforeDepth: beforeRoad?.depthCm || 0,
-      afterDepth: afterRoad?.depthCm || 0,
-      beforeUtil: beforeNode?.utilPct || 0,
-      afterUtil: afterNode?.utilPct || 0,
-      beforeRisk: beforeRoad?.risk || 'SAFE',
-      afterRisk: afterRoad?.risk || 'SAFE',
-      beforeTTF: beforeRoad?.ttf,
-      afterTTF: afterRoad?.ttf,
-      affectedRoads,
-      affectedNodes: newState.nodes.filter(n => n.utilPct > 80).map(n => n.id),
-    });
-  }, [scenario, timeMin]);
-
-  const handleComputeRoute = useCallback((oLat, oLng, dLat, dLng, vehicle) => {
-    const result = engine.computeRoute(oLat, oLng, dLat, dLng, vehicle);
-    setRouteResult(result);
-    setRoutePath(result.path || null);
+    try {
+      const result = engine.runWhatIf(nodeId, blockagePct);
+      setWhatIfComparison(result);
+      setSimState({ ...engine.state });
+      setBlockages({ [nodeId]: blockagePct });
+    } catch (err) {
+      console.error('What-If simulation failed:', err);
+    }
   }, []);
+
+  const handleComputeRoute = useCallback((vehicle) => {
+    if (!routingOrigin || !routingDestination) return;
+    try {
+      const result = engine.computeRoute(
+        routingOrigin.lat, routingOrigin.lng,
+        routingDestination.lat, routingDestination.lng,
+        vehicle,
+      );
+      setRouteResult(result);
+      setRoutePath(result.path || null);
+    } catch (err) {
+      console.error('Route computation failed:', err);
+    }
+  }, [routingOrigin, routingDestination]);
+
+  const handleClearRoute = useCallback(() => {
+    setRoutingOrigin(null);
+    setRoutingDestination(null);
+    setRouteResult(null);
+    setRoutePath(null);
+  }, []);
+
+  const handleMapClick = useCallback((coordinate) => {
+    if (activeTab !== 'routing') return;
+    const [lng, lat] = coordinate;
+    if (!routingOrigin) {
+      setRoutingOrigin({ lat, lng });
+    } else if (!routingDestination) {
+      setRoutingDestination({ lat, lng });
+    }
+  }, [activeTab, routingOrigin, routingDestination]);
 
   const handleLayerToggle = useCallback((key) => {
-    setEnabledLayers(prev => ({ ...prev, [key]: !prev[key] }));
+    setEnabledLayers((prev) => ({ ...prev, [key]: !prev[key] }));
   }, []);
 
-  // Computed values
-  const maxDepth = Math.max(0, ...simState.roads.map(r => r.depthCm));
-  const criticalRoads = simState.roads.filter(r => r.risk === 'CRITICAL').length;
-  const highRoads = simState.roads.filter(r => r.risk === 'HIGH').length;
-  const stressedNodes = simState.nodes.filter(n => n.utilPct > 75).length;
-  const alertCount = simState.alerts?.length || 0;
-  const rainfall = simState.nowcast?.current || 0;
+  const handleTimelineChange = useCallback((e) => {
+    setTimeMin(parseInt(e.target.value, 10));
+    setIsPlaying(false);
+  }, []);
+
+  const handleReset = useCallback(() => {
+    setTimeMin(0);
+    setIsPlaying(false);
+  }, []);
+
+  // Derived KPI values for the summary strip
+  const maxDepth = Math.max(0, ...simState.roads.map((r) => r.depthCm));
+  const criticalRoadCount = simState.roads.filter((r) => r.risk === 'CRITICAL').length;
+  const highRoadCount = simState.roads.filter((r) => r.risk === 'HIGH').length;
+  const stressedNodeCount = simState.nodes.filter((n) => n.utilPct > 75).length;
+  const alertCount = simState.alerts?.length ?? 0;
+  const currentRainfallMmh = simState.nowcast?.current ?? 0;
 
   return (
     <>
@@ -144,18 +189,24 @@ function App() {
             <span className="brand-icon">◆</span>
             FLOODTWIN
           </h1>
-          <span className="header-badge sih-badge">SIH26085</span>
           <span className="header-badge pilot-badge">Chennai Pilot · T. Nagar</span>
-          <span className="header-badge demo-indicator">
-            <span className="demo-dot" />
-            DEMO MODE
-          </span>
+          {isBackendLive ? (
+            <span className="header-badge api-connected">
+              <span className="status-dot green" />
+              API CONNECTED
+            </span>
+          ) : (
+            <span className="header-badge engine-standalone">
+              <span className="status-dot cyan" />
+              STANDALONE ENGINE
+            </span>
+          )}
         </div>
         <div className="header-right">
           <select
             id="scenario-select"
             value={scenario}
-            onChange={e => { setScenario(e.target.value); setTimeMin(0); setIsPlaying(false); setBlockages({}); setComparison(null); setRouteResult(null); setRoutePath(null); }}
+            onChange={handleScenarioChange}
           >
             <option value="baseline">☀ NORMAL (No Rain)</option>
             <option value="moderate_rain">🌦 MODERATE (25 mm/h)</option>
@@ -178,15 +229,16 @@ function App() {
             layers={enabledLayers}
             onNodeClick={handleNodeClick}
             onRoadClick={handleRoadClick}
+            onMapClick={handleMapClick}
             routePath={routePath}
+            routingOrigin={routingOrigin}
+            routingDestination={routingDestination}
           />
 
-          {/* Layer control */}
           <div className="map-overlay-tl">
             <LayerControl layers={enabledLayers} onToggle={handleLayerToggle} />
           </div>
 
-          {/* Map legend */}
           <div className="map-legend">
             <div className="legend-title">Road Risk</div>
             <div className="legend-items">
@@ -199,12 +251,16 @@ function App() {
         </div>
 
         {/* ── Left Panel ── */}
-        <div className={`side-panel left-panel ${leftOpen ? 'open' : 'collapsed'}`}>
-          <button className="panel-toggle" onClick={() => setLeftOpen(!leftOpen)}>
-            {leftOpen ? <ChevronLeft size={16} /> : <ChevronRight size={16} />}
+        <div className={`side-panel left-panel ${isLeftPanelOpen ? 'open' : 'collapsed'}`}>
+          <button
+            className="panel-toggle"
+            onClick={() => setIsLeftPanelOpen((open) => !open)}
+            aria-label={isLeftPanelOpen ? 'Collapse panel' : 'Expand panel'}
+          >
+            {isLeftPanelOpen ? <ChevronLeft size={16} /> : <ChevronRight size={16} />}
           </button>
 
-          {leftOpen && (
+          {isLeftPanelOpen && (
             <>
               {/* KPI Strip */}
               <div className="kpi-strip" id="kpi-strip">
@@ -216,20 +272,20 @@ function App() {
                 </div>
                 <div className="kpi">
                   <span className="kpi-label">Critical Roads</span>
-                  <span className={`kpi-value ${criticalRoads > 0 ? 'risk-CRITICAL' : 'risk-SAFE'}`}>
-                    {criticalRoads}
+                  <span className={`kpi-value ${criticalRoadCount > 0 ? 'risk-CRITICAL' : 'risk-SAFE'}`}>
+                    {criticalRoadCount}
                   </span>
                 </div>
                 <div className="kpi">
                   <span className="kpi-label">Rainfall</span>
-                  <span className={`kpi-value ${rainfall > 60 ? 'risk-CRITICAL' : rainfall > 25 ? 'risk-CAUTION' : 'risk-SAFE'}`}>
-                    {rainfall.toFixed(0)}<small>mm/h</small>
+                  <span className={`kpi-value ${currentRainfallMmh > 60 ? 'risk-CRITICAL' : currentRainfallMmh > 25 ? 'risk-CAUTION' : 'risk-SAFE'}`}>
+                    {currentRainfallMmh.toFixed(0)}<small>mm/h</small>
                   </span>
                 </div>
                 <div className="kpi">
                   <span className="kpi-label">Stressed Nodes</span>
-                  <span className={`kpi-value ${stressedNodes > 3 ? 'risk-HIGH' : stressedNodes > 0 ? 'risk-CAUTION' : 'risk-SAFE'}`}>
-                    {stressedNodes}
+                  <span className={`kpi-value ${stressedNodeCount > 3 ? 'risk-HIGH' : stressedNodeCount > 0 ? 'risk-CAUTION' : 'risk-SAFE'}`}>
+                    {stressedNodeCount}
                   </span>
                 </div>
               </div>
@@ -267,13 +323,16 @@ function App() {
                   <WhatIfPanel
                     nodes={simState.nodes}
                     onSimulate={handleWhatIf}
-                    comparison={comparison}
+                    comparison={whatIfComparison}
                   />
                 )}
                 {activeTab === 'routing' && (
                   <RoutingPanel
                     onComputeRoute={handleComputeRoute}
+                    onClear={handleClearRoute}
                     routeResult={routeResult}
+                    origin={routingOrigin}
+                    destination={routingDestination}
                   />
                 )}
                 {activeTab === 'alerts' && (
@@ -300,29 +359,24 @@ function App() {
           <div className="timeline-header">
             <span className="timeline-title">0–3h FORECAST TIMELINE</span>
             <div className="timeline-kpis">
-              <span className={`timeline-kpi ${criticalRoads > 0 ? 'risk-CRITICAL' : ''}`}>
-                {criticalRoads} Critical
+              <span className={`timeline-kpi ${criticalRoadCount > 0 ? 'risk-CRITICAL' : ''}`}>
+                {criticalRoadCount} Critical
               </span>
-              <span className={`timeline-kpi ${highRoads > 0 ? 'risk-HIGH' : ''}`}>
-                {highRoads} High
+              <span className={`timeline-kpi ${highRoadCount > 0 ? 'risk-HIGH' : ''}`}>
+                {highRoadCount} High
               </span>
               <span className="timeline-kpi">
-                {rainfall.toFixed(0)} mm/h
+                {currentRainfallMmh.toFixed(0)} mm/h
               </span>
             </div>
           </div>
           <div className="timeline-controls">
-            <button
-              id="btn-reset"
-              onClick={() => { setTimeMin(0); setIsPlaying(false); }}
-              title="Reset"
-              className="timeline-btn"
-            >
+            <button id="btn-reset" onClick={handleReset} title="Reset" className="timeline-btn">
               <SkipBack size={14} />
             </button>
             <button
               id="btn-play"
-              onClick={() => setIsPlaying(!isPlaying)}
+              onClick={() => setIsPlaying((p) => !p)}
               className="timeline-btn play-btn"
             >
               {isPlaying ? <Pause size={14} /> : <Play size={14} />}
@@ -332,13 +386,15 @@ function App() {
               <input
                 id="timeline-slider"
                 type="range"
-                min="0" max="180" step="5"
+                min="0"
+                max={TIMELINE_MAX_MINUTES}
+                step={TIMELINE_STEP_MINUTES}
                 value={timeMin}
-                onChange={e => { setTimeMin(parseInt(e.target.value)); setIsPlaying(false); }}
+                onChange={handleTimelineChange}
                 className="timeline-slider"
               />
               <div className="timeline-ticks">
-                {[0, 30, 60, 90, 120, 150, 180].map(t => (
+                {TIMELINE_MARKS.map((t) => (
                   <span key={t} className={`tick ${t <= timeMin ? 'past' : ''}`}>
                     {t === 0 ? 'NOW' : `+${t}m`}
                   </span>
