@@ -234,6 +234,59 @@ def get_road_closures() -> List[dict]:
     ]
 
 
+# ── Requirement 17 REST API Alias Endpoints ──
+
+@router.get("/rainfall/current", response_model=NowcastState, tags=["Rainfall"])
+def get_rainfall_current() -> NowcastState:
+    return engine.state.nowcast
+
+
+@router.get("/rainfall/forecast", response_model=NowcastState, tags=["Rainfall"])
+def get_rainfall_forecast() -> NowcastState:
+    return engine.state.nowcast
+
+
+@router.get("/flood/current", tags=["Flood Risk"])
+def get_flood_current() -> List[dict]:
+    return [segment.model_dump() for segment in engine.state.roads]
+
+
+@router.get("/flood/forecast", tags=["Flood Risk"])
+def get_flood_forecast() -> List[dict]:
+    return [segment.model_dump() for segment in engine.state.roads]
+
+
+@router.get("/roads/risk", tags=["Roads"])
+def get_roads_risk() -> List[dict]:
+    return [segment.model_dump() for segment in engine.state.roads]
+
+
+@router.post("/scenario/what-if", response_model=WhatIfComparison, tags=["Analysis"])
+async def run_scenario_whatif(request: WhatIfRequest) -> WhatIfComparison:
+    return await run_whatif(request)
+
+
+@router.post("/routing/safe", response_model=RouteResponse, tags=["Routing"])
+def compute_routing_safe(request: RouteRequest) -> RouteResponse:
+    return engine.compute_route(request)
+
+
+@router.get("/metadata", tags=["Metadata"])
+def get_metadata() -> Dict[str, str]:
+    return {
+        "project": "FloodTwin",
+        "sih_problem_statement": "SIH26085",
+        "title": "Urban Flood Nowcasting System (Drainage and Rainfall Coupling)",
+        "pilot_location": "T. Nagar, Chennai, Tamil Nadu, India",
+        "center_coordinates": "13.0418 N, 80.2341 E",
+        "version": "1.0.0",
+        "data_mode": DataMode.DEMO.value,
+        "hydraulic_engine": "1D SWMM-inspired drainage + 2D surface coupling",
+        "nowcasting_method": "Optical-flow extrapolation + ML refinement (DEMO)",
+        "confidence_tiers": "Tier A (Municipal/Sensors), Tier B (GIS/Elevation), Tier C (Estimated/Synthetic)",
+    }
+
+
 app.include_router(router)
 app.include_router(router, prefix="/api")
 

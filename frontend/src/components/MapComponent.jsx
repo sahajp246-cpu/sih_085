@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import * as maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
-import { MapboxOverlay } from '@deck.gl/mapbox';
+import { Deck } from '@deck.gl/core';
 import { GoogleMapsOverlay } from '@deck.gl/google-maps';
 import { PathLayer, ScatterplotLayer, PolygonLayer } from '@deck.gl/layers';
 import { HeatmapLayer } from '@deck.gl/aggregation-layers';
@@ -13,7 +13,9 @@ import {
 } from '../config/mapConfig';
 import { RISK_COLORS_RGB, STATUS_COLORS_RGB, TIER_LABELS } from '../config/riskColors';
 import { CHENNAI_TNAGAR_BUILDINGS_GEOJSON } from '../config/chennaiBuildings';
-import { MapPin, RefreshCw, Compass } from 'lucide-react';
+import { MapPin } from 'lucide-react';
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
 
 function buildFloodPolygons(roads) {
   const ROAD_BUFFER_DEG = 0.0003;
@@ -88,44 +90,72 @@ function buildTooltipHtml(object) {
       <div>Dia: ${object.diameter}mm · Len: ${object.length}m</div>
     `;
   }
-
   return null;
 }
 
-const TOOLTIP_STYLE = {
-  backgroundColor: 'rgba(10,14,26,0.94)',
-  color: '#f1f5f9',
-  padding: '10px 12px',
-  borderRadius: '6px',
-  fontSize: '0.82rem',
-  border: '1px solid rgba(255,255,255,0.12)',
-  maxWidth: '240px',
-  boxShadow: '0 4px 16px rgba(0,0,0,0.6)',
-};
+// ── Google Maps loader ────────────────────────────────────────────────────────
 
-const GOOGLE_MAPS_SCRIPT_ID = 'google-maps-api-script';
+const GOOGLE_MAPS_SCRIPT_ID = 'floodtwin-gmaps-script';
 
 function loadGoogleMapsApi(apiKey) {
   return new Promise((resolve, reject) => {
-    if (window.google?.maps) {
-      resolve(window.google.maps);
-      return;
-    }
-    const existingScript = document.getElementById(GOOGLE_MAPS_SCRIPT_ID);
-    if (existingScript) {
-      existingScript.remove();
-    }
-
+    if (window.google?.maps) { resolve(window.google.maps); return; }
+    const existing = document.getElementById(GOOGLE_MAPS_SCRIPT_ID);
+    if (existing) existing.remove();
     const script = document.createElement('script');
     script.id = GOOGLE_MAPS_SCRIPT_ID;
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=visualization,places,maps3d&v=beta`;
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=visualization,places&v=beta`;
     script.async = true;
     script.defer = true;
     script.onload = () => resolve(window.google.maps);
-    script.onerror = () => reject(new Error('Google Maps script load network error'));
+    script.onerror = () => reject(new Error('Google Maps failed'));
     document.head.appendChild(script);
   });
 }
+
+// ── MapLibre style ────────────────────────────────────────────────────────────
+
+const MAPLIBRE_STYLE = {
+  version: 8,
+  sources: {
+    'esri-satellite': {
+      type: 'raster',
+      tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
+      tileSize: 256,
+      attribution: '© Esri, Maxar, Earthstar Geographics',
+      maxzoom: 19,
+    },
+    'esri-labels': {
+      type: 'raster',
+      tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}'],
+      tileSize: 256,
+      attribution: '© Esri',
+      maxzoom: 19,
+    },
+    'chennai-3d-buildings': {
+      type: 'geojson',
+      data: CHENNAI_TNAGAR_BUILDINGS_GEOJSON,
+    },
+  },
+  layers: [
+    { id: 'satellite-base', type: 'raster', source: 'esri-satellite' },
+    { id: 'road-labels', type: 'raster', source: 'esri-labels', minzoom: 12, paint: { 'raster-opacity': 0.7 } },
+    {
+      id: 'buildings-3d',
+      type: 'fill-extrusion',
+      source: 'chennai-3d-buildings',
+      paint: {
+        'fill-extrusion-color': ['interpolate', ['linear'], ['get', 'height'],
+          15, '#1e293b', 30, '#334155', 45, '#475569', 60, '#64748b'],
+        'fill-extrusion-height': ['get', 'height'],
+        'fill-extrusion-base': 0,
+        'fill-extrusion-opacity': 0.82,
+      },
+    },
+  ],
+};
+
+// ── Component ─────────────────────────────────────────────────────────────────
 
 export default function MapComponent({
   simState,
@@ -137,28 +167,36 @@ export default function MapComponent({
   routingOrigin,
   routingDestination,
 }) {
-  const mapContainerRef = useRef(null);
-  const maplibreInstanceRef = useRef(null);
-  const googleMapInstanceRef = useRef(null);
-  const deckOverlayRef = useRef(null);
+  const wrapperRef = useRef(null);          // outer div
+  const mapContainerRef = useRef(null);     // MapLibre target div
+  const maplibreRef = useRef(null);
+  const deckRef = useRef(null);
+  const googleMapRef = useRef(null);
+  const googleDeckRef = useRef(null);
 
   const [activeProvider, setActiveProvider] = useState(
     GOOGLE_MAPS_API_KEY ? 'google-loading' : 'maplibre'
   );
+  const [tooltip, setTooltip] = useState(null); // { x, y, html }
+  const [viewState, setViewState] = useState({
+    longitude: CHENNAI_TNAGAR_CENTER.lng,
+    latitude: CHENNAI_TNAGAR_CENTER.lat,
+    zoom: 15.6,
+    pitch: 52,
+    bearing: -15,
+  });
 
-  // Catch Google Maps auth failures and automatically switch to MapLibre
+  // Google Maps auth failure handler
   useEffect(() => {
     window.gm_authFailure = () => {
-      console.warn('[FloodTwin Map] Google Maps API key unauthorized. Switching to MapLibre GL JS 3D Satellite Map.');
+      console.warn('[FloodTwin] Google Maps auth failed — switching to MapLibre.');
       setActiveProvider('maplibre');
     };
-    return () => {
-      window.gm_authFailure = null;
-    };
+    return () => { window.gm_authFailure = null; };
   }, []);
 
-  // ── Build simulation Deck.gl layers ──
-  const buildSimulationLayers = useCallback(() => {
+  // ── Build simulation Deck.gl layers ──────────────────────────────────────
+  const buildLayers = useCallback(() => {
     const result = [];
 
     if (enabledLayers.rainfall && simState.nowcast?.cells?.length) {
@@ -171,14 +209,10 @@ export default function MapComponent({
         intensity: 1,
         threshold: 0.1,
         colorRange: [
-          [65, 182, 196, 60],
-          [127, 205, 187, 100],
-          [199, 233, 180, 120],
-          [255, 255, 204, 140],
-          [255, 237, 160, 180],
-          [254, 178, 76, 200],
-          [253, 141, 60, 220],
-          [240, 59, 32, 240],
+          [65, 182, 196, 60], [127, 205, 187, 100],
+          [199, 233, 180, 120], [255, 255, 204, 140],
+          [255, 237, 160, 180], [254, 178, 76, 200],
+          [253, 141, 60, 220], [240, 59, 32, 240],
         ],
       }));
     }
@@ -244,11 +278,11 @@ export default function MapComponent({
     }
 
     if (enabledLayers.criticalNodes) {
-      const nearCapacityNodes = simState.nodes.filter((n) => n.utilPct > 90);
-      if (nearCapacityNodes.length > 0) {
+      const nearCapacity = simState.nodes.filter((n) => n.utilPct > 90);
+      if (nearCapacity.length > 0) {
         result.push(new ScatterplotLayer({
           id: 'critical-pulse',
-          data: nearCapacityNodes,
+          data: nearCapacity,
           pickable: false,
           stroked: true,
           filled: false,
@@ -309,14 +343,13 @@ export default function MapComponent({
       );
     }
 
-    const selectionMarkers = [];
-    if (routingOrigin) selectionMarkers.push({ lng: routingOrigin.lng, lat: routingOrigin.lat, color: [16, 185, 129] });
-    if (routingDestination) selectionMarkers.push({ lng: routingDestination.lng, lat: routingDestination.lat, color: [239, 68, 68] });
-
-    if (selectionMarkers.length > 0) {
+    const selMarkers = [];
+    if (routingOrigin) selMarkers.push({ lng: routingOrigin.lng, lat: routingOrigin.lat, color: [16, 185, 129] });
+    if (routingDestination) selMarkers.push({ lng: routingDestination.lng, lat: routingDestination.lat, color: [239, 68, 68] });
+    if (selMarkers.length > 0) {
       result.push(new ScatterplotLayer({
         id: 'routing-selection-markers',
-        data: selectionMarkers,
+        data: selMarkers,
         pickable: false,
         filled: true,
         stroked: true,
@@ -331,174 +364,217 @@ export default function MapComponent({
     return result;
   }, [simState, enabledLayers, routePath, routingOrigin, routingDestination, onNodeClick, onRoadClick]);
 
-  // ── Initialize Priority 1: Google Maps 3D ──
+  // ── Initialize MapLibre + standalone Deck ────────────────────────────────
   useEffect(() => {
-    if (activeProvider !== 'google-loading') return;
+    if (activeProvider !== 'maplibre') return;
+    if (!mapContainerRef.current || !wrapperRef.current) return;
 
-    let isSubscribed = true;
-    loadGoogleMapsApi(GOOGLE_MAPS_API_KEY)
-      .then((mapsApi) => {
-        if (!isSubscribed || !mapContainerRef.current) return;
-
-        const mapOptions = {
-          ...INITIAL_MAP_OPTIONS,
-          ...(GOOGLE_MAPS_MAP_ID ? { mapId: GOOGLE_MAPS_MAP_ID } : {}),
-        };
-
-        const map = new mapsApi.Map(mapContainerRef.current, mapOptions);
-        googleMapInstanceRef.current = map;
-
-        const overlay = new GoogleMapsOverlay({
-          getTooltip: ({ object }) => {
-            const html = buildTooltipHtml(object);
-            return html ? { html, style: TOOLTIP_STYLE } : null;
-          },
-        });
-        overlay.setMap(map);
-        deckOverlayRef.current = overlay;
-
-        if (onMapClick) {
-          map.addListener('click', (e) => {
-            onMapClick([e.latLng.lng(), e.latLng.lat()]);
-          });
-        }
-
-        setActiveProvider('google');
-      })
-      .catch((err) => {
-        if (!isSubscribed) return;
-        console.warn('[FloodTwin Map] Google Maps API failed to load. Falling back to MapLibre 3D Satellite Map:', err);
-        setActiveProvider('maplibre');
-      });
-
-    return () => {
-      isSubscribed = false;
-      if (deckOverlayRef.current && activeProvider === 'google') {
-        deckOverlayRef.current.setMap(null);
-        deckOverlayRef.current = null;
-      }
-      googleMapInstanceRef.current = null;
-    };
-  }, [activeProvider, onMapClick]);
-
-  // ── Initialize Mandatory Fallback: MapLibre GL JS 3D Satellite Map ──
-  useEffect(() => {
-    if (activeProvider !== 'maplibre' || !mapContainerRef.current) return;
-
-    // Clean up previous instance
-    if (maplibreInstanceRef.current) {
-      maplibreInstanceRef.current.remove();
-      maplibreInstanceRef.current = null;
-    }
-
-    const mapStyle = {
-      version: 8,
-      sources: {
-        'esri-satellite': {
-          type: 'raster',
-          tiles: [
-            'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-          ],
-          tileSize: 256,
-          attribution: '© Esri, Maxar, Earthstar Geographics, and GIS User Community',
-          maxzoom: 19,
-        },
-        'chennai-3d-buildings': {
-          type: 'geojson',
-          data: CHENNAI_TNAGAR_BUILDINGS_GEOJSON,
-        },
-      },
-      layers: [
-        {
-          id: 'satellite-tiles',
-          type: 'raster',
-          source: 'esri-satellite',
-          minzoom: 0,
-          maxzoom: 19,
-        },
-        {
-          id: '3d-buildings-extrusion',
-          type: 'fill-extrusion',
-          source: 'chennai-3d-buildings',
-          paint: {
-            'fill-extrusion-color': [
-              'interpolate',
-              ['linear'],
-              ['get', 'height'],
-              15, '#1e293b',
-              30, '#334155',
-              45, '#475569',
-              60, '#64748b',
-            ],
-            'fill-extrusion-height': ['get', 'height'],
-            'fill-extrusion-base': 0,
-            'fill-extrusion-opacity': 0.82,
-          },
-        },
-      ],
-    };
+    // Cleanup prior instances
+    if (maplibreRef.current) { maplibreRef.current.remove(); maplibreRef.current = null; }
+    if (deckRef.current) { deckRef.current.finalize(); deckRef.current = null; }
 
     const map = new maplibregl.Map({
       container: mapContainerRef.current,
-      style: mapStyle,
+      style: MAPLIBRE_STYLE,
       center: [CHENNAI_TNAGAR_CENTER.lng, CHENNAI_TNAGAR_CENTER.lat],
       zoom: 15.6,
-      pitch: 58,
+      pitch: 52,
       bearing: -15,
       maxPitch: 85,
       attributionControl: false,
     });
-    maplibreInstanceRef.current = map;
+    maplibreRef.current = map;
 
-    const deckOverlay = new MapboxOverlay({
-      interleaved: false,
-      layers: buildSimulationLayers(),
-      getTooltip: ({ object }) => {
-        const html = buildTooltipHtml(object);
-        return html ? { html, style: TOOLTIP_STYLE } : null;
+    // Create a dedicated canvas for Deck.gl layered on top of MapLibre
+    const deckCanvas = document.createElement('canvas');
+    deckCanvas.style.position = 'absolute';
+    deckCanvas.style.inset = '0';
+    deckCanvas.style.width = '100%';
+    deckCanvas.style.height = '100%';
+    deckCanvas.style.pointerEvents = 'none'; // MapLibre handles panning, Deck is visual only
+    wrapperRef.current.appendChild(deckCanvas);
+
+    // Size canvas properly
+    const wrapper = wrapperRef.current;
+    const resizeCanvas = () => {
+      deckCanvas.width = wrapper.offsetWidth * window.devicePixelRatio;
+      deckCanvas.height = wrapper.offsetHeight * window.devicePixelRatio;
+      deckCanvas.style.width = wrapper.offsetWidth + 'px';
+      deckCanvas.style.height = wrapper.offsetHeight + 'px';
+    };
+    resizeCanvas();
+    const ro = new ResizeObserver(resizeCanvas);
+    ro.observe(wrapper);
+
+    const deck = new Deck({
+      canvas: deckCanvas,
+      width: wrapper.offsetWidth,
+      height: wrapper.offsetHeight,
+      viewState: {
+        longitude: CHENNAI_TNAGAR_CENTER.lng,
+        latitude: CHENNAI_TNAGAR_CENTER.lat,
+        zoom: 15.6,
+        pitch: 52,
+        bearing: -15,
       },
+      controller: false, // MapLibre controls the viewport
+      useDevicePixels: true,
+      layers: buildLayers(),
     });
+    deckRef.current = deck;
 
-    map.addControl(deckOverlay);
-    deckOverlayRef.current = deckOverlay;
+    // Sync Deck viewport with MapLibre
+    const syncViewport = () => {
+      const center = map.getCenter();
+      const vs = {
+        longitude: center.lng,
+        latitude: center.lat,
+        zoom: map.getZoom(),
+        pitch: map.getPitch(),
+        bearing: map.getBearing(),
+      };
+      deck.setProps({ viewState: vs });
+      setViewState(vs);
+    };
 
+    map.on('move', syncViewport);
+    map.on('zoom', syncViewport);
+    map.on('pitch', syncViewport);
+    map.on('rotate', syncViewport);
+
+    // Handle click for routing
     map.on('click', (e) => {
-      if (onMapClick) {
-        onMapClick([e.lngLat.lng, e.lngLat.lat]);
-      }
+      if (onMapClick) onMapClick([e.lngLat.lng, e.lngLat.lat]);
     });
+
+    // Handle hover on MapLibre canvas for tooltip (forward to Deck picking)
+    const mlCanvas = map.getCanvas();
+    const onMouseMove = (e) => {
+      const rect = mlCanvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      const picked = deck.pickObject({ x, y, radius: 4 });
+      if (picked && picked.object) {
+        const html = buildTooltipHtml(picked.object);
+        if (html) { setTooltip({ x: e.clientX, y: e.clientY, html }); return; }
+      }
+      setTooltip(null);
+    };
+    const onMouseLeave = () => setTooltip(null);
+
+    mlCanvas.addEventListener('mousemove', onMouseMove);
+    mlCanvas.addEventListener('mouseleave', onMouseLeave);
+
+    // Handle click picking on Deck layers (node/road click)
+    const onMapClick2 = (e) => {
+      const rect = mlCanvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      const picked = deck.pickObject({ x, y, radius: 6 });
+      if (picked && picked.object) {
+        const obj = picked.object;
+        if (obj.type && obj.id && !obj.source && onNodeClick) { onNodeClick(obj); return; }
+        if (obj.path && obj.name && onRoadClick) { onRoadClick(obj); return; }
+      }
+    };
+    mlCanvas.addEventListener('click', onMapClick2);
 
     return () => {
-      if (maplibreInstanceRef.current) {
-        maplibreInstanceRef.current.remove();
-        maplibreInstanceRef.current = null;
+      ro.disconnect();
+      mlCanvas.removeEventListener('mousemove', onMouseMove);
+      mlCanvas.removeEventListener('mouseleave', onMouseLeave);
+      mlCanvas.removeEventListener('click', onMapClick2);
+      if (deckRef.current) { deckRef.current.finalize(); deckRef.current = null; }
+      if (maplibreRef.current) { maplibreRef.current.remove(); maplibreRef.current = null; }
+      if (wrapperRef.current && wrapperRef.current.contains(deckCanvas)) {
+        wrapperRef.current.removeChild(deckCanvas);
       }
-      deckOverlayRef.current = null;
     };
-  }, [activeProvider, onMapClick]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeProvider]);
 
-  // ── Sync Deck.gl simulation layers on state updates ──
+  // ── Initialize Google Maps ────────────────────────────────────────────────
   useEffect(() => {
-    if (deckOverlayRef.current) {
-      deckOverlayRef.current.setProps({ layers: buildSimulationLayers() });
+    if (activeProvider !== 'google-loading') return;
+    let alive = true;
+    loadGoogleMapsApi(GOOGLE_MAPS_API_KEY)
+      .then((mapsApi) => {
+        if (!alive || !mapContainerRef.current) return;
+        const gmap = new mapsApi.Map(mapContainerRef.current, {
+          ...INITIAL_MAP_OPTIONS,
+          ...(GOOGLE_MAPS_MAP_ID ? { mapId: GOOGLE_MAPS_MAP_ID } : {}),
+        });
+        googleMapRef.current = gmap;
+        const overlay = new GoogleMapsOverlay({
+          getTooltip: ({ object }) => {
+            if (!object) { setTooltip(null); return null; }
+            const html = buildTooltipHtml(object);
+            return html ? { html, style: { backgroundColor: 'rgba(10,14,26,0.94)', color: '#f1f5f9', padding: '10px 12px', borderRadius: '6px', fontSize: '0.82rem', border: '1px solid rgba(255,255,255,0.12)' } } : null;
+          },
+          layers: buildLayers(),
+        });
+        overlay.setMap(gmap);
+        googleDeckRef.current = overlay;
+        if (onMapClick) {
+          gmap.addListener('click', (e) => onMapClick([e.latLng.lng(), e.latLng.lat()]));
+        }
+        setActiveProvider('google');
+      })
+      .catch(() => {
+        if (alive) {
+          console.warn('[FloodTwin] Google Maps unavailable — using MapLibre satellite.');
+          setActiveProvider('maplibre');
+        }
+      });
+    return () => { alive = false; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeProvider]);
+
+  // ── Sync layers on simulation state change ────────────────────────────────
+  useEffect(() => {
+    const layers = buildLayers();
+    if (deckRef.current) {
+      deckRef.current.setProps({ layers });
     }
-  }, [buildSimulationLayers]);
+    if (googleDeckRef.current) {
+      googleDeckRef.current.setProps({ layers });
+    }
+  }, [buildLayers]);
 
   return (
-    <div style={{ position: 'relative', width: '100%', height: '100%', minHeight: '100%', backgroundColor: '#0a0e1a', overflow: 'hidden' }}>
-
-      {/* Map Container Element */}
+    <div
+      ref={wrapperRef}
+      style={{ position: 'relative', width: '100%', height: '100%', backgroundColor: '#0a0e1a', overflow: 'hidden' }}
+    >
+      {/* Map provider target */}
       <div
         ref={mapContainerRef}
-        style={{
-          width: '100%',
-          height: '100%',
-          position: 'absolute',
-          inset: 0,
-        }}
+        style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}
       />
 
-      {/* Provider Status / Location Badge */}
+      {/* React-rendered tooltip */}
+      {tooltip && (
+        <div
+          style={{
+            position: 'fixed',
+            left: tooltip.x + 14,
+            top: tooltip.y - 14,
+            backgroundColor: 'rgba(10,14,26,0.94)',
+            color: '#f1f5f9',
+            padding: '10px 12px',
+            borderRadius: '6px',
+            fontSize: '0.82rem',
+            border: '1px solid rgba(255,255,255,0.12)',
+            maxWidth: '240px',
+            boxShadow: '0 4px 16px rgba(0,0,0,0.6)',
+            zIndex: 50,
+            pointerEvents: 'none',
+          }}
+          dangerouslySetInnerHTML={{ __html: tooltip.html }}
+        />
+      )}
+
+      {/* Provider badge */}
       <div style={{
         position: 'absolute',
         bottom: 12,
@@ -520,14 +596,14 @@ export default function MapComponent({
         <MapPin size={12} style={{ color: '#ef4444' }} />
         <span>
           {activeProvider === 'google'
-            ? 'Google 3D Satellite Map · T. Nagar, Chennai'
+            ? 'Google 3D Satellite · T. Nagar, Chennai'
             : activeProvider === 'maplibre'
-            ? '3D Aerial Satellite Map (Esri/MapLibre) · T. Nagar, Chennai'
-            : 'Loading Map Provider (T. Nagar, Chennai)…'}
+            ? '3D Satellite Map (Esri/MapLibre) · T. Nagar, Chennai'
+            : 'Loading map…'}
         </span>
       </div>
 
-      {/* Esri & OpenStreetMap Data Attribution */}
+      {/* Attribution */}
       {activeProvider === 'maplibre' && (
         <div style={{
           position: 'absolute',
@@ -538,7 +614,7 @@ export default function MapComponent({
           pointerEvents: 'none',
           zIndex: 10,
         }}>
-          © Esri, Maxar, Earthstar Geographics | OpenStreetMap
+          © Esri, Maxar, Earthstar Geographics
         </div>
       )}
     </div>

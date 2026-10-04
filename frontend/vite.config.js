@@ -5,11 +5,11 @@ export default defineConfig({
   plugins: [react()],
   optimizeDeps: {
     include: [
+      '@deck.gl/core',
       '@deck.gl/react',
       '@deck.gl/layers',
       '@deck.gl/aggregation-layers',
       '@deck.gl/google-maps',
-      '@deck.gl/mapbox',
       'maplibre-gl',
     ],
   },
